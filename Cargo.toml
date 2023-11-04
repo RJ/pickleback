@@ -1,0 +1,17 @@
+[package]
+name = "bevy_reparate"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+aeronet = {version = "0.2.0", features = ["bevy"]}
+aeronet_channel = { version = "0.2.0", features = ["bevy"]}
+bevy = { version = "0.11.3", default-features = false}
+byteorder = "1.5.0"
+log = "0.4.20"
+serde = "1.0.190"
+
+[dev-dependencies]
+env_logger = "0.10.0"
