@@ -143,9 +143,9 @@ impl ReparateServerPlugin {
             if let Some(cc) = &server_slots.slots[i] {
                 let age = now - cc.last_packet_time;
                 if age > Duration::from_millis(3000) {
-                    error!("Client timeout: {i} {:?}", cc.address);
+                    // error!("Client timeout: {i} {:?}", cc.address);
                     // TODO publish client disconnect event
-                    server_slots.slots[i] = None;
+                    // server_slots.slots[i] = None;
                     continue;
                 }
             }
@@ -190,8 +190,8 @@ impl ReparateServerPlugin {
                     error!("Can't send to adddress: {destination:?} - drop client?");
                     break;
                 }
-                Err(error) => {
-                    error!("Server Error: {}", error);
+                Err(NaiaServerSocketError::Wrapped(error)) => {
+                    error!("Server Error: {:?}", error);
                     // hopefully an error means no more packets to read this tick,
                     // otherwise we'd be introducing a tick delay on processing here..
                     break;
