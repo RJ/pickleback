@@ -5,12 +5,18 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[features]
+default = ["is_server", "is_client"]
+is_client = ["naia-client-socket"]
+is_server = ["naia-server-socket"]
+
 [dependencies]
-aeronet = {version = "0.2.0", features = ["bevy"]}
-aeronet_channel = { version = "0.2.0", features = ["bevy"]}
-bevy = { version = "0.11.3", default-features = false}
+bevy = { version = "0.11.3"}
 byteorder = "1.5.0"
 log = "0.4.20"
+naia-client-socket = {version = "0.20.1", optional = true}
+naia-server-socket =  {version = "0.20.0", optional = true}
+naia-socket-shared = "0.20.0"
 serde = "1.0.190"
 
 [dev-dependencies]
