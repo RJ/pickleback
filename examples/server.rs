@@ -12,11 +12,11 @@ fn main() {
 
 fn print_packets(mut ev: ResMut<Events<ReceivedPacket>>) {
     for ReceivedPacket {
-        slot,
+        client_handle,
         received_at,
         payload,
     } in ev.drain()
     {
-        info!("PRINT_PACKETS {slot} = {payload:?}");
+        info!("PRINT_PACKETS {client_handle:?} = {payload:?}");
     }
 }

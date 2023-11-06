@@ -15,10 +15,23 @@ pub struct ServerChannels {
 }
 
 pub struct ConnectedClient {
-    slot: SlotNumber,
+    handle: ClientHandle,
     address: SocketAddr,
     last_packet_time: Instant,
+    salt: u32,
     // endpoint things
+}
+
+impl ConnectedClient {
+    fn handle(&self) -> &ClientHandle {
+        &self.handle
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct ClientHandle {
+    slot: SlotNumber,
+    salt: u32,
 }
 
 impl ConnectedClient {
@@ -30,42 +43,69 @@ impl ConnectedClient {
 #[derive(Resource, Default)]
 pub struct ServerSlots {
     slots: [Option<ConnectedClient>; 32],
+    next_salt: u32,
 }
 
+#[derive(Event)]
+pub enum NetworkEvent {
+    ClientConnected(ClientHandle),
+    ClientDisconnected(ClientHandle),
+}
+
+// TODO should put clients into a pending state until we get a valid own-protocol packet, checking
+// protocol version, etc
+
 impl ServerSlots {
+    fn connected_clients(&self) -> impl Iterator<Item = &'_ ConnectedClient> {
+        let x = self.slots.iter().filter_map(|o| o.as_ref());
+        x
+    }
+    fn get(&self, handle: ClientHandle) -> Option<&ConnectedClient> {
+        if let Some(cc) = &self.slots[handle.slot as usize] {
+            if cc.salt == handle.salt {
+                return Some(cc);
+            }
+        }
+        None
+    }
     // fn get_or_insert_client(&mut self, address: Sco)
-    fn slot_in_new_client(&mut self, address: SocketAddr, instant: Instant) -> Option<SlotNumber> {
+    fn slot_in_new_client(
+        &mut self,
+        address: SocketAddr,
+        instant: Instant,
+    ) -> Option<ClientHandle> {
         for i in 0..self.slots.len() {
             if self.slots[i].is_some() {
                 continue;
             }
-            let connected_client = ConnectedClient {
+            let handle = ClientHandle {
                 slot: i as SlotNumber,
+                salt: self.next_salt,
+            };
+            let connected_client = ConnectedClient {
+                handle,
                 address,
                 last_packet_time: instant,
+                salt: handle.salt,
             };
+            self.next_salt += 1;
             self.slots[i] = Some(connected_client);
-            return Some(i as SlotNumber);
+            return Some(handle);
         }
         // no slots free
         None
     }
     fn get_connected_client_mut(&mut self, address: SocketAddr) -> Option<&mut ConnectedClient> {
-        // yuk.. find a more elegant way
-        let mut found = usize::MAX;
+        let mut found = None;
         for i in 0..self.slots.len() {
             if let Some(slot) = &self.slots[i] {
                 if slot.address == address {
-                    found = i;
+                    found = Some(i);
                     break;
                 }
             }
         }
-        if found == usize::MAX {
-            None
-        } else {
-            self.slots.get_mut(found).unwrap().as_mut()
-        }
+        found.map(|i| self.slots.get_mut(i).unwrap().as_mut().unwrap())
     }
 }
 
@@ -73,14 +113,14 @@ pub struct ReparateServerPlugin;
 
 #[derive(Event)]
 pub struct ReceivedPacket {
-    pub slot: SlotNumber,
+    pub client_handle: ClientHandle,
     pub received_at: Instant,
     pub payload: Vec<u8>,
 }
 
 #[derive(Event)]
 struct OutboundPacket {
-    slot: SlotNumber,
+    client_handle: ClientHandle,
     payload: Vec<u8>,
 }
 
@@ -105,29 +145,51 @@ impl Plugin for ReparateServerPlugin {
         };
         app.insert_resource(server_channels);
         app.insert_resource(ServerSlots::default());
+        app.init_resource::<Events<NetworkEvent>>();
         app.init_resource::<Events<ReceivedPacket>>();
         app.init_resource::<Events<OutboundPacket>>();
         app.add_systems(PreUpdate, Self::read_packets);
         app.add_systems(PostUpdate, Self::send_packets);
+
+        app.add_systems(FixedUpdate, Self::periodic_send);
     }
 }
 
 impl ReparateServerPlugin {
+    fn periodic_send(
+        mut server_channels: ResMut<ServerChannels>,
+        mut server_slots: ResMut<ServerSlots>,
+        mut ev: EventWriter<OutboundPacket>,
+    ) {
+        let payload = Vec::from("HELLO".as_bytes());
+        for cc in server_slots.connected_clients() {
+            ev.send(OutboundPacket {
+                client_handle: *cc.handle(),
+                payload: payload.clone(),
+            })
+        }
+    }
+
     fn send_packets(
         mut server_channels: ResMut<ServerChannels>,
         mut server_slots: ResMut<ServerSlots>,
         mut ev: ResMut<Events<OutboundPacket>>,
+        mut net_ev: EventWriter<NetworkEvent>,
     ) {
         let now = Instant::now();
         // send queued outbound packets
-        for OutboundPacket { slot, payload } in ev.drain() {
-            if let Some(cc) = server_slots.slots.get(slot as usize).unwrap() {
+        for OutboundPacket {
+            client_handle,
+            payload,
+        } in ev.drain()
+        {
+            if let Some(cc) = server_slots.get(client_handle) {
                 match server_channels
                     .packet_sender
                     .send(&cc.address, payload.as_slice())
                 {
                     Ok(()) => {
-                        info!("sent packet to {slot}");
+                        info!("sent packet to {client_handle:?}");
                     }
                     Err(err) => {
                         warn!("server send err {err:?}");
@@ -135,20 +197,21 @@ impl ReparateServerPlugin {
                 }
                 // get address, use channel sender
             } else {
-                warn!("Dropping outbound packet for empty slot {slot}");
+                warn!("Dropping outbound packet for empty slot {client_handle:?}");
             }
         }
         // check for client timeout due to no packets received recently
-        for i in 0..server_slots.slots.len() {
-            if let Some(cc) = &server_slots.slots[i] {
-                let age = now - cc.last_packet_time;
-                if age > Duration::from_millis(3000) {
-                    // error!("Client timeout: {i} {:?}", cc.address);
-                    // TODO publish client disconnect event
-                    // server_slots.slots[i] = None;
-                    continue;
-                }
-            }
+        let timed_out = server_slots
+            .connected_clients()
+            .filter(|cc| now - cc.last_packet_time > Duration::from_millis(5000))
+            .map(|cc| cc.handle)
+            .collect::<Vec<_>>();
+
+        for handle in timed_out {
+            error!("Client timeout: {handle:?}");
+            server_slots.slots[handle.slot as usize] = None;
+            net_ev.send(NetworkEvent::ClientDisconnected(handle));
+            continue;
         }
     }
 
@@ -156,20 +219,22 @@ impl ReparateServerPlugin {
         mut server_channels: ResMut<ServerChannels>,
         mut ev: EventWriter<ReceivedPacket>,
         mut slots: ResMut<ServerSlots>,
+        mut net_ev: EventWriter<NetworkEvent>,
     ) {
         loop {
             match server_channels.packet_receiver.receive() {
                 Ok(Some((address, payload))) => {
                     let received_at = Instant::now();
                     // if there isn't a connected client already, create one
-                    let slot = if let Some(cc) = slots.get_connected_client_mut(address) {
+                    let client_handle = if let Some(cc) = slots.get_connected_client_mut(address) {
                         cc.set_last_packet_time(received_at);
-                        info!("Recv[{}]> {address:?} {payload:?}", cc.slot);
-                        cc.slot
-                    } else if let Some(slot_num) = slots.slot_in_new_client(address, received_at) {
+                        net_ev.send(NetworkEvent::ClientConnected(cc.handle));
+                        info!("Recv[{}]> {address:?} {payload:?}", cc.handle.slot);
+                        cc.handle
+                    } else if let Some(handle) = slots.slot_in_new_client(address, received_at) {
                         // TODO publish a "new client connected" msg
-                        info!("Recv[NEW: {slot_num}]> {address:?} {payload:?}");
-                        slot_num
+                        info!("Recv[NEW: {handle:?}]> {address:?} {payload:?}");
+                        handle
                     } else {
                         // TODO respond with "server full"
                         error!("Connection attempt from {address:?} but no slots");
@@ -178,7 +243,7 @@ impl ReparateServerPlugin {
 
                     let p = ReceivedPacket {
                         received_at,
-                        slot,
+                        client_handle,
                         payload: Vec::from(payload), // TODO lazy clone.
                     };
                     ev.send(p);
