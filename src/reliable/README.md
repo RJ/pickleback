@@ -31,11 +31,66 @@ messages need to have their own header now:
 ## Reliable Base Layer
 
 * Doesn't do fragmentation, only accepts payloads under the fragment size / mtu.
-* "send payload" --> issues/returns a seqno, builds packet with headers + payload, puts in outbox.
-* "recv payload" --> parses headers, extracts acks and writes to ack-outbox, puts payload in inbox.
+* "send payload" --> issues/returns a seqno, builds packet with headers + payload, puts datagram in outbox. (a fixed-size header would allow us to be more efficient with how we allocate payloads - reserving space at the front.)
+* "recv datagram" --> parses headers, extracts acks and writes to ack-outbox, puts payload in inbox.
+
+## Message coalescing and reliability layer
+
+* you send "messages", which can be larger than mtu.
+* messages get issued a `MessageId`, which is local-only. We map `MessageId` to the packet seqno it was sent in, for acking. Consumers get acks per `MessageId`.
+* we coalesce multiple messages into a single packet
+* sending a message larger than mtu causes it to be broken up into multiple messages, each with
+  their own local msgid, including fragment data in the message header
+
+So on sending fragments, we need to map a list of fragment message ids -> original message id.
+and when all fragment messages ids are acked, ack the original.
+we can't just ack the original when the packet it was in gets acked. that'll just be the first fragment..
+
+```rust
+MessageId {
+    num: u32,
+    parent_id: Option<u32> // msg is a fragment of a larger msg stored in the fragmap
+
+    fragmented? = parent_id.is_some()
+}
+
+// Sender store which msg ids were included in sent packets
+// original message ids of messages that got fragmented don't end up in this map
+// those get turned into multiple new message ids
+AckMap(HashMap<SequenceNumber, Vec<MessageId>>);
+
+// stores unacked messageids. once vec is empty, ack the original message id.
+FragMap(HashMap<MessageId, Vec<u32>>)
+```
+On sender side, when a seqno is acked, we grab the list of now `acked_msg_ids` from the ackmap, 
+and remove the entry from the AckMap.
+
+If the MessageId indicates it is unfragmented msg, simply report ack for all `acked_msg_ids` to consumer.
+
+In the case of message being a fragment:
+* the fragmented msg id was never issued to a consumer, so don't remote ack to the consumer.
+* grab the parent message id and lookup in fragmap. 
+* remove ids in acked_msg_ids from the vec of unacked message ids
+* if unacked message ids vec is now empty, report the ack of the parent message id to consumer.
 
 
 
+
+### Reliability
+
+Most game network packets are unreliable. Player inputs, state updates, etc.
+
+There are a few small reliable (ordered) messages, like chat.
+
+The important large reliable message is the initial state transfer on joining a game.
+
+If messages are reliable (ie, on a reliable channel?) we store them in an outbox until acked.
+we include in packets any unacked messages that were last sent > 100ms ago.
+
+this means if we send a large, reliable, fragmented message, such as intitial game state split into 5 packets,
+if one packet doesn't arrive, just the messages left unacked from that packet would be retransmitted.
+
+Also, when we create the fragment messages, we can send them all at once in a burst (up to some limit?).
 
 ### Message header
 

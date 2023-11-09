@@ -3,11 +3,11 @@ use bevy::prelude::*;
 use bevy_reparate::*;
 
 fn main() {
-    let mut app = App::new();
-    app.add_plugins(DefaultPlugins);
-    app.add_plugins(ReparateClientPlugin);
-    // app.add_systems(Update, print_packets);
-    app.run();
+    // let mut app = App::new();
+    // app.add_plugins(DefaultPlugins);
+    // app.add_plugins(ReparateClientPlugin);
+    // // app.add_systems(Update, print_packets);
+    // app.run();
 }
 
 // fn print_packets(mut ev: ResMut<Events<ReceivedPacket>>) {

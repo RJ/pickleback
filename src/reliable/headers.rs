@@ -1,15 +1,17 @@
 use crate::ReliableError;
 use bevy::log::*;
-use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+// use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::num::Wrapping;
 
 pub trait HeaderParser {
     type T;
 
+    fn max_possible_size() -> usize;
+
     fn size(&self) -> usize;
     fn write(&self, writer: &mut BytesMut) -> Result<(), ReliableError>;
-    fn parse(reader: &Bytes) -> Result<Self::T, ReliableError>;
+    fn parse(reader: &mut Bytes) -> Result<Self::T, ReliableError>;
 }
 
 #[derive(Clone, PartialEq, PartialOrd, Debug, Default)]
@@ -41,7 +43,9 @@ impl PacketHeader {
 
 impl HeaderParser for PacketHeader {
     type T = Self;
-
+    fn max_possible_size() -> usize {
+        9
+    }
     fn size(&self) -> usize {
         let mut size: usize = 3;
 
@@ -134,7 +138,7 @@ impl HeaderParser for PacketHeader {
         Ok(())
     }
 
-    fn parse(reader: &Bytes) -> Result<Self, ReliableError> {
+    fn parse(mut reader: &mut Bytes) -> Result<Self, ReliableError> {
         if reader.remaining() < 3 {
             error!("Packet too small for packet header (1)");
             return Err(ReliableError::PacketTooSmall);
@@ -149,7 +153,7 @@ impl HeaderParser for PacketHeader {
         let ack: u16;
         let mut ack_bits: u32 = 0xFFFF_FFFF;
         let sequence = reader.get_u16_le();
-
+        // ack is greatest seqno seen?
         if prefix_byte & (1 << 5) != 0 {
             if reader.remaining() < 4 {
                 error!("Packet too small for packet header (2)");
@@ -201,112 +205,5 @@ impl HeaderParser for PacketHeader {
             ack,
             ack_bits,
         })
-    }
-}
-
-#[derive(Clone, PartialEq, PartialOrd, Debug)]
-pub struct FragmentHeader {
-    sequence: u16,
-    id: u8,
-    num_fragments: u8, // TODO: wouldnt it be more efficient for this to be remaining?
-    packet_header: Option<PacketHeader>,
-}
-
-impl<'a> FragmentHeader {
-    pub fn new(id: u8, num_fragments: u8, packet_header: PacketHeader) -> Self {
-        let sequence = packet_header.sequence();
-        Self {
-            id,
-            num_fragments,
-            packet_header: Some(packet_header),
-            sequence,
-        }
-    }
-    pub fn new_fragment(id: u8, num_fragments: u8, sequence: u16) -> Self {
-        Self {
-            id,
-            num_fragments,
-            sequence,
-            packet_header: None,
-        }
-    }
-
-    pub fn sequence(&self) -> u16 {
-        self.sequence
-    }
-    pub fn id(&self) -> u8 {
-        self.id
-    }
-    pub fn count(&self) -> u8 {
-        self.num_fragments
-    }
-    pub fn packet_header(&self) -> Option<&PacketHeader> {
-        self.packet_header.as_ref()
-    }
-}
-
-impl HeaderParser for FragmentHeader {
-    type T = Self;
-
-    fn size(&self) -> usize {
-        if self.id == 0 {
-            if self.packet_header.is_some() {
-                return self.packet_header.as_ref().unwrap().size() + 5;
-            }
-            panic!("Attemtping to retrieve size on a 0 ID packet with no packet header");
-        } else {
-            5
-        }
-    }
-
-    fn write(&self, writer: &mut BytesMut) -> Result<(), ReliableError> {
-        if writer.remaining_mut() < 5 {
-            panic!("::write given too-small BytesMut");
-        }
-        writer.put_u8(1);
-        writer.put_u16_le(self.sequence);
-        writer.put_u8(self.id);
-        writer.put_u8(self.num_fragments);
-
-        if self.id == 0 {
-            if let Some(ref header) = self.packet_header {
-                if writer.remaining_mut() < header.size() {
-                    panic!("::write given too-small for packet header BytesMut");
-                }
-                header.write(writer);
-            } else {
-                return Err(ReliableError::InvalidFragment);
-            }
-        }
-
-        Ok(())
-    }
-
-    fn parse(reader: &Bytes) -> Result<Self::T, ReliableError> {
-        let prefix_byte = reader.get_u8();
-        if prefix_byte != 1 {
-            panic!("Not a fragment packet");
-        }
-        if reader.remaining() < 4 {
-            error!("Packet too small for fragment packet header");
-            return Err(ReliableError::InvalidPacket);
-        }
-        let sequence = reader.get_u16_le();
-        let id = reader.get_u8();
-        let num_fragments = reader.get_u8();
-
-        let mut r = Self {
-            sequence,
-            id,
-            num_fragments,
-            packet_header: None,
-        };
-
-        // first of the fragment packets contains a header
-        if id == 0 {
-            r.packet_header = Some(PacketHeader::parse(reader)?);
-        }
-
-        Ok(r)
     }
 }

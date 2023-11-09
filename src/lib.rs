@@ -86,9 +86,7 @@ const MAX_PAYLOAD_SIZE: u16 = 1150;
 impl Servent {
     pub fn new(time: f64) -> Self {
         let endpoint_config = EndpointConfig {
-            max_packet_size: (16 * MAX_PAYLOAD_SIZE).into(),
-            fragment_above: MAX_PAYLOAD_SIZE.into(),
-            max_fragments: 16,
+            max_payload_size: 1024,
             ..default()
         };
         let endpoint = Endpoint::new(endpoint_config, time);
@@ -97,11 +95,6 @@ impl Servent {
             time,
             unreliable_message_outbox: UnreliableMessageOutbox::default(),
         }
-    }
-
-    pub fn allocate_packet_buffer(&mut self) -> Box<[u8]> {
-        let packet_max_size = self.endpoint.config().fragment_above;
-        vec![0; packet_max_size].into_boxed_slice()
     }
 
     /// enqueue a message to be sent in a packet.
@@ -123,8 +116,7 @@ impl Servent {
         // they are only used locally for tracking acks. we map packet-level acks back to
         // message ids, so we report messages acks to the consumer.
         // we just need to track which messages ids were in which packet sequence number.
-        let fragment_size = self.endpoint.config().fragment_above;
-        let mut cursor = Cursor::new(self.allocate_packet_buffer());
+
         // let mut buf = BytesMut::with_capacity(fragment_size);
 
         // TODO always include all unacked reliable msgs at the start of the packet,
@@ -138,48 +130,49 @@ impl Servent {
 
         // first pass: send unreliable messages > fragment size as fragmented packets.
         // second pass: coalesce remaining unreliable messages until outbox is empty.
+        let mut buffer = BytesMut::with_capacity(self.endpoint.max_payload_size());
 
         while !self.unreliable_message_outbox.is_empty() {
             let mut message_ids_in_packet = Vec::<MessageId>::new();
             let mut packet = BytesMut::new();
 
-            while let Some(msg) = self
-                .unreliable_message_outbox
-                .take_message(fragment_size - 2 as usize)
-            {
-                if packet.len() == 0 {
-                    if msg.size() <= self.endpoint.config().fragment_above {
-                        packet.reserve();
-                    }
-                }
-                info!("* Writing {msg:?} to packet buffer..");
-                cursor.write_u16::<BigEndian>(msg.size() as u16).unwrap();
-                cursor.write_all(msg.payload().as_ref()).unwrap();
-                message_ids_in_packet.push(msg.id);
-            }
+            // while let Some(msg) = self
+            //     .unreliable_message_outbox
+            //     .take_message(fragment_size - 2 as usize)
+            // {
+            //     if packet.len() == 0 {
+            //         if msg.size() <= self.endpoint.config().fragment_above {
+            //             packet.reserve();
+            //         }
+            //     }
+            //     info!("* Writing {msg:?} to packet buffer..");
+            //     cursor.write_u16::<BigEndian>(msg.size() as u16).unwrap();
+            //     cursor.write_all(msg.payload().as_ref()).unwrap();
+            //     message_ids_in_packet.push(msg.id);
+            // }
 
-            let packet_size = cursor.position() as usize;
-            let buffer = cursor.into_inner();
-            let packet_payload = &(buffer.as_ref())[0..packet_size];
+            // let packet_size = cursor.position() as usize;
+            // let buffer = cursor.into_inner();
+            // let packet_payload = &(buffer.as_ref())[0..packet_size];
 
-            match self.endpoint.send(Bytes::from(packet_payload)) {
-                Ok(handle) => {
-                    info!("Sending packet containing msg ids: {message_ids_in_packet:?}, in packet seq {handle:?}");
-                    self.unreliable_message_outbox
-                        .register_message_ids_in_packet(handle, message_ids_in_packet);
-                }
-                Err(err) => {
-                    error!("Err sending coalesced packet {err:?}");
-                }
-            }
+            // match self.endpoint.send(Bytes::from(packet_payload)) {
+            //     Ok(handle) => {
+            //         info!("Sending packet containing msg ids: {message_ids_in_packet:?}, in packet seq {handle:?}");
+            //         self.unreliable_message_outbox
+            //             .register_message_ids_in_packet(handle, message_ids_in_packet);
+            //     }
+            //     Err(err) => {
+            //         error!("Err sending coalesced packet {err:?}");
+            //     }
+            // }
         }
     }
 
     /// called after acks and headers stripped, we just process the payload
     /// do we plug in some sort of packet state machine object here, or what?
-    fn process_received_packet(&mut self, packet: ReceivedPacket) {
+    fn process_received_packet(&mut self, payload: Bytes) {
         // possibly just write to an inbox?
-        info!("process_received_packet: {packet:?}");
+        info!("process_received_packet: {payload:?}");
     }
 
     // this needs to ack message ids assocated with the handle
@@ -209,14 +202,16 @@ impl Servent {
     /// could split this up by not returning ReceivedPacets, but writing to a queue
     /// so we could process incoming in PreUpdate, but only process the queue of received in Fixed?
     pub fn process_incoming_packet(&mut self, packet: Bytes) {
-        match self.endpoint.recv(packet) {
-            Ok((opt_packet, new_acks)) => {
-                for handle in &new_acks {
-                    self.ack_packet_handle(handle);
+        match self.endpoint.receive(packet) {
+            Ok(ReceivedPacket {
+                handle: _,
+                payload,
+                acks,
+            }) => {
+                for acked_handle in &acks {
+                    self.ack_packet_handle(acked_handle);
                 }
-                if let Some(packet) = opt_packet {
-                    self.process_received_packet(packet);
-                }
+                self.process_received_packet(payload);
             }
             Err(err) => {
                 warn!("incoming packet error {err:?}");
