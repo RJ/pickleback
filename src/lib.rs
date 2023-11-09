@@ -7,62 +7,184 @@ use std::{collections::VecDeque, net::SocketAddr};
 use bevy::prelude::*;
 use bevy::utils::HashMap;
 use byteorder::{BigEndian, WriteBytesExt};
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use reliable::*;
+mod message;
+use message::*;
 
-// pub struct Datagram {
-//     pub payload: Vec<u8>,
-//     pub address: SocketAddr,
-// }
-
-pub type MessageId = u32;
-
-#[derive(Debug)]
-struct UnreliableMessage {
+/// You get a MessageHandle when you call `send_message(payload)`.
+/// It's only useful if you want to know if an ack was received for this message.
+#[derive(Default, Debug)]
+pub struct MessageHandle {
     id: MessageId,
-    payload: Bytes,
+    parent: Option<MessageId>,
 }
-impl UnreliableMessage {
-    fn size(&self) -> usize {
-        self.payload.len()
+impl MessageHandle {
+    pub fn new(id: MessageId) -> Self {
+        Self { id, parent: None }
     }
-    fn payload(&self) -> &Bytes {
-        &self.payload
+    pub fn id(&self) -> MessageId {
+        self.id
+    }
+    pub fn is_fragment(&self) -> bool {
+        self.parent.is_some()
+    }
+
+    pub fn parent_id(&self) -> Option<MessageId> {
+        self.parent
+    }
+}
+
+/// tracks the unacked message ids assigned to fragments of a larger message id.
+/// they're removed as they are acked & once depleted, the original parent message id is acked.
+#[derive(Default)]
+pub struct SentFragMap {
+    m: HashMap<MessageId, Vec<MessageId>>,
+}
+impl SentFragMap {
+    pub fn insert_fragmented_message(&mut self, id: MessageId, fragment_ids: Vec<MessageId>) {
+        let res = self.m.insert(id, fragment_ids);
+        assert!(
+            res.is_none(),
+            "why are we overwriting something in the fragmap?"
+        );
+    }
+    /// returns true if parent message is whole/acked.
+    pub fn ack_message_id_for_fragment(
+        &mut self,
+        parent_message_id: MessageId,
+        id_to_ack: MessageId,
+    ) -> bool {
+        let ret = if let Some(v) = self.m.get_mut(&parent_message_id) {
+            v.retain(|id| *id != id_to_ack);
+            v.is_empty()
+        } else {
+            false
+        };
+        if ret {
+            self.m.remove(&parent_message_id);
+        }
+        ret
     }
 }
 
 #[derive(Default)]
-struct UnreliableMessageOutbox {
-    q: VecDeque<UnreliableMessage>,
-    messages_in_packets: HashMap<SentHandle, Vec<MessageId>>,
-    message_seq: MessageId,
+struct MessageDispatcher {
+    // q_reliable: VecDeque<Message>,
+    q_unreliable: VecDeque<Message>,
+    next_message_id: MessageId,
+    sent_frag_map: SentFragMap,
+    messages_in_packets: HashMap<SentHandle, Vec<MessageHandle>>,
 }
-impl UnreliableMessageOutbox {
+impl MessageDispatcher {
+    /// sets the list of messageids contained in the packet
+    fn set_packet_message_handles(
+        &mut self,
+        packet_handle: SentHandle,
+        message_handles: Vec<MessageHandle>,
+    ) {
+        self.messages_in_packets
+            .insert(packet_handle, message_handles);
+    }
+    // got a packet ack? we'll give you message ids that it acks.
+    fn acked_packet_to_acked_messages(&mut self, packet_handle: &SentHandle) -> Vec<MessageId> {
+        let mut acked_ids = Vec::new();
+        // check message handles that were just acked - if any are fragments, we need to log that
+        // in the frag map, incase it results in a parent message id being acked (ie, all frag messages are now acked)
+        if let Some(msg_handles) = self.messages_in_packets.remove(packet_handle) {
+            for msg_handle in &msg_handles {
+                if let Some(parent_id) = msg_handle.parent_id() {
+                    info!("got ack for {msg_handle:?}, removing from fragmap");
+                    // fragment message
+                    if self
+                        .sent_frag_map
+                        .ack_message_id_for_fragment(parent_id, msg_handle.id())
+                    {
+                        info!("all frags acked, acking parent msg id {parent_id}");
+                        acked_ids.push(parent_id);
+                    }
+                } else {
+                    acked_ids.push(msg_handle.id());
+                }
+            }
+        }
+        acked_ids
+    }
+
+    /// takes a payload of any size and writes messages to the outbox queues.
+    /// will fragment into multiple messages if payload is > 1024
     fn add(&mut self, payload: Bytes) -> MessageId {
-        let id = self.message_seq;
-        self.message_seq += 1;
-        let msg = UnreliableMessage { id, payload };
-        self.q.push_back(msg);
+        if payload.len() <= 1024 {
+            self.add_unfragmented(payload)
+        } else {
+            self.add_fragmented(payload)
+        }
+    }
+
+    fn add_unfragmented(&mut self, payload: Bytes) -> MessageId {
+        assert!(payload.len() <= 1024);
+        let id = self.next_message_id;
+        self.next_message_id += 1;
+        let channel = 0;
+        let msg = Message::new_unfragmented(id, channel, payload);
+        // put on reliable or unreliable q based on channel?
+        self.q_unreliable.push_back(msg);
         id
     }
+
+    fn add_fragmented(&mut self, mut payload: Bytes) -> MessageId {
+        assert!(payload.len() > 1024);
+        // this is the message id we return to the user, upon which they await an ack.
+        let parent_id = self.next_message_id;
+        self.next_message_id += 1;
+        let payload_len = payload.len();
+        let channel = 0;
+
+        // split into multiple messages.
+        // track fragmented part message ids associated with the parent message ID which we return
+        // so we can ack it once all fragment messages are acked.
+        let remainder = if payload_len % 1024 > 0 { 1 } else { 0 };
+        let num_fragments = (payload_len / 1024) + remainder;
+        let mut fragment_ids = Vec::new();
+        for fragment_id in 0..num_fragments {
+            let payload_size = if fragment_id == num_fragments - 1 {
+                payload_len - (num_fragments - 1) * 1024
+            } else {
+                1024
+            };
+            let frag_payload = payload.split_to(payload_size);
+            let fragment_id = self.next_message_id;
+            self.next_message_id += 1;
+            let msg = Message::new_fragment(
+                fragment_id,
+                channel,
+                frag_payload,
+                fragment_id as u16,
+                num_fragments as u16,
+                parent_id,
+            );
+            fragment_ids.push(fragment_id);
+            // put on reliable or unreliable q based on channel?
+            self.q_unreliable.push_back(msg);
+        }
+        self.sent_frag_map
+            .insert_fragmented_message(parent_id, fragment_ids);
+
+        parent_id
+    }
+
     fn is_empty(&self) -> bool {
-        self.q.is_empty()
+        self.q_unreliable.is_empty()
     }
     /// removes and returns oldest message from queue within max_size constraint
-    fn take_message(&mut self, max_size: usize) -> Option<UnreliableMessage> {
-        for index in 0..self.q.len() {
-            if self.q[index].size() > max_size {
+    fn take_unreliable_message(&mut self, max_size: usize) -> Option<Message> {
+        for index in 0..self.q_unreliable.len() {
+            if max_size > 0 && self.q_unreliable[index].size() > max_size {
                 continue;
             }
-            return self.q.remove(index);
+            return self.q_unreliable.remove(index);
         }
         None
-    }
-    fn register_message_ids_in_packet(&mut self, handle: SentHandle, message_ids: Vec<MessageId>) {
-        self.messages_in_packets.insert(handle, message_ids);
-    }
-    fn take_message_ids_for_handle(&mut self, handle: &SentHandle) -> Option<Vec<MessageId>> {
-        self.messages_in_packets.remove(handle)
     }
 }
 
@@ -70,11 +192,10 @@ pub struct Servent {
     endpoint: Endpoint,
     time: f64,
     /// messages waiting to be coalesced into packets for sending
-    unreliable_message_outbox: UnreliableMessageOutbox,
+    message_dispatcher: MessageDispatcher,
     // received_packet_inbox:
     // reliable_message_outbox: VecDeque<(u32, &'s [u8])>,
 }
-const MAX_PAYLOAD_SIZE: u16 = 1150;
 
 /// Represents one end of a datagram stream between two peers, one of which is the server.
 ///
@@ -93,14 +214,14 @@ impl Servent {
         Self {
             endpoint,
             time,
-            unreliable_message_outbox: UnreliableMessageOutbox::default(),
+            message_dispatcher: MessageDispatcher::default(),
         }
     }
 
     /// enqueue a message to be sent in a packet.
     /// messages get coalesced into packets.
     pub fn send_message(&mut self, message_payload: Bytes) -> MessageId {
-        self.unreliable_message_outbox.add(message_payload)
+        self.message_dispatcher.add(message_payload)
     }
 
     // when creating the messages, we want one big BytesMut?? with views into it, refcounted so
@@ -116,55 +237,35 @@ impl Servent {
         // they are only used locally for tracking acks. we map packet-level acks back to
         // message ids, so we report messages acks to the consumer.
         // we just need to track which messages ids were in which packet sequence number.
+        while !self.message_dispatcher.is_empty() {
+            let mut message_handles_in_packet = Vec::<MessageHandle>::new();
+            info!("Allocated new packet to coalesce into.");
+            let mut packet = BytesMut::with_capacity(1150); // 1024 + headers etc.. should calculate exactly.
 
-        // let mut buf = BytesMut::with_capacity(fragment_size);
+            while let Some(msg) = self
+                .message_dispatcher
+                .take_unreliable_message(packet.remaining())
+            {
+                info!("* Writing {msg:?} to packet buffer..");
+                msg.write(&mut packet)
+                    .expect("writing to a buffer shouldn't fail");
+                message_handles_in_packet.push(MessageHandle {
+                    id: msg.id(),
+                    parent: msg.parent_id(),
+                });
+            }
+            // now send this packet:
 
-        // TODO always include all unacked reliable msgs at the start of the packet,
-        // provided they haven't been sent in the last 0.1 seconds.
-
-        // what about messages that required packet fragments?
-
-        // we need to create packets from the messages.
-        // lots of small unreliable messages can be coalesced into a packet.
-        // small reliable msgs can be added first, to those packets, if unacked within 100ms.
-
-        // first pass: send unreliable messages > fragment size as fragmented packets.
-        // second pass: coalesce remaining unreliable messages until outbox is empty.
-        let mut buffer = BytesMut::with_capacity(self.endpoint.max_payload_size());
-
-        while !self.unreliable_message_outbox.is_empty() {
-            let mut message_ids_in_packet = Vec::<MessageId>::new();
-            let mut packet = BytesMut::new();
-
-            // while let Some(msg) = self
-            //     .unreliable_message_outbox
-            //     .take_message(fragment_size - 2 as usize)
-            // {
-            //     if packet.len() == 0 {
-            //         if msg.size() <= self.endpoint.config().fragment_above {
-            //             packet.reserve();
-            //         }
-            //     }
-            //     info!("* Writing {msg:?} to packet buffer..");
-            //     cursor.write_u16::<BigEndian>(msg.size() as u16).unwrap();
-            //     cursor.write_all(msg.payload().as_ref()).unwrap();
-            //     message_ids_in_packet.push(msg.id);
-            // }
-
-            // let packet_size = cursor.position() as usize;
-            // let buffer = cursor.into_inner();
-            // let packet_payload = &(buffer.as_ref())[0..packet_size];
-
-            // match self.endpoint.send(Bytes::from(packet_payload)) {
-            //     Ok(handle) => {
-            //         info!("Sending packet containing msg ids: {message_ids_in_packet:?}, in packet seq {handle:?}");
-            //         self.unreliable_message_outbox
-            //             .register_message_ids_in_packet(handle, message_ids_in_packet);
-            //     }
-            //     Err(err) => {
-            //         error!("Err sending coalesced packet {err:?}");
-            //     }
-            // }
+            match self.endpoint.send(packet.freeze()) {
+                Ok(handle) => {
+                    info!("Sending packet containing msg ids: {message_handles_in_packet:?}, in packet seq {handle:?}");
+                    self.message_dispatcher
+                        .set_packet_message_handles(handle, message_handles_in_packet);
+                }
+                Err(err) => {
+                    error!("Err sending coalesced packet {err:?}");
+                }
+            }
         }
     }
 
@@ -173,19 +274,6 @@ impl Servent {
     fn process_received_packet(&mut self, payload: Bytes) {
         // possibly just write to an inbox?
         info!("process_received_packet: {payload:?}");
-    }
-
-    // this needs to ack message ids assocated with the handle
-    fn ack_packet_handle(&mut self, handle: &SentHandle) {
-        info!("ACK packet handle {handle:?}");
-        if let Some(msg_ids) = self
-            .unreliable_message_outbox
-            .take_message_ids_for_handle(handle)
-        {
-            for msg_id in msg_ids {
-                info!("* Ack message {msg_id} via packet {handle:?}");
-            }
-        }
     }
 
     pub fn update(&mut self, dt: f64) {
@@ -209,7 +297,10 @@ impl Servent {
                 acks,
             }) => {
                 for acked_handle in &acks {
-                    self.ack_packet_handle(acked_handle);
+                    let msg_acks = self
+                        .message_dispatcher
+                        .acked_packet_to_acked_messages(acked_handle);
+                    info!("NEW MSG ACKS (via packet ack of {acked_handle:?} = {msg_acks:?}");
                 }
                 self.process_received_packet(payload);
             }

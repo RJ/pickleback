@@ -8,6 +8,7 @@ pub enum ReliableError {
     InvalidPacket,
     StalePacket,
     InvalidFragment,
+    InvalidMessage,
 }
 
 impl std::fmt::Display for ReliableError {
