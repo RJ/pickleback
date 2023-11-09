@@ -1,14 +1,15 @@
 use crate::ReliableError;
+use bevy::log::*;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-use log::*;
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::num::Wrapping;
 
 pub trait HeaderParser {
     type T;
 
     fn size(&self) -> usize;
-    fn write(&self, writer: &mut std::io::Cursor<&mut [u8]>) -> Result<(), ReliableError>;
-    fn parse(reader: &mut std::io::Cursor<&[u8]>) -> Result<Self::T, ReliableError>;
+    fn write(&self, writer: &mut BytesMut) -> Result<(), ReliableError>;
+    fn parse(reader: &Bytes) -> Result<Self::T, ReliableError>;
 }
 
 #[derive(Clone, PartialEq, PartialOrd, Debug, Default)]
@@ -72,11 +73,12 @@ impl HeaderParser for PacketHeader {
         size
     }
 
-    #[cfg_attr(
-        feature = "cargo-clippy",
-        allow(cast_possible_truncation, cast_sign_loss, if_not_else)
-    )]
-    fn write(&self, writer: &mut std::io::Cursor<&mut [u8]>) -> Result<(), ReliableError> {
+    // max of 9 bytes?
+    fn write(&self, writer: &mut BytesMut) -> Result<(), ReliableError> {
+        if writer.remaining_mut() < 9 {
+            panic!("::write given too-small BytesMut");
+        }
+
         let mut prefix_byte = 0;
 
         if (self.ack_bits & 0x0000_00FF) != 0x0000_00FF {
@@ -104,46 +106,40 @@ impl HeaderParser for PacketHeader {
             prefix_byte |= 1 << 5;
         }
 
-        writer.write_u8(prefix_byte)?;
-        writer.write_u16::<LittleEndian>(self.sequence)?;
+        writer.put_u8(prefix_byte); // 1
+        writer.put_u16_le(self.sequence); // +2 = 3
 
         if sequence_difference <= 255 {
-            writer.write_u8(sequence_difference as u8)?;
+            writer.put_u8(sequence_difference as u8); // +1 = 4
         } else {
-            writer.write_u16::<LittleEndian>(self.ack)?;
+            writer.put_u16_le(self.ack); // or +2 = 5
         }
-
+        // +4:
         if (self.ack_bits & 0x0000_00FF) != 0x0000_00FF {
-            writer.write_u8((self.ack_bits & 0x0000_00FF) as u8)?;
+            writer.put_u8((self.ack_bits & 0x0000_00FF) as u8);
         }
 
         if (self.ack_bits & 0x0000_FF00) != 0x0000_FF00 {
-            writer.write_u8(((self.ack_bits & 0x0000_FF00) >> 8) as u8)?;
+            writer.put_u8(((self.ack_bits & 0x0000_FF00) >> 8) as u8);
         }
 
         if (self.ack_bits & 0x00FF_0000) != 0x00FF_0000 {
-            writer.write_u8(((self.ack_bits & 0x00FF_0000) >> 16) as u8)?;
+            writer.put_u8(((self.ack_bits & 0x00FF_0000) >> 16) as u8);
         }
 
         if (self.ack_bits & 0xFF00_0000) != 0xFF00_0000 {
-            writer.write_u8(((self.ack_bits & 0xFF00_0000) >> 24) as u8)?;
+            writer.put_u8(((self.ack_bits & 0xFF00_0000) >> 24) as u8);
         }
 
         Ok(())
     }
 
-    #[cfg_attr(
-        feature = "cargo-clippy",
-        allow(cast_possible_truncation, cast_sign_loss, if_not_else)
-    )]
-    fn parse(reader: &mut std::io::Cursor<&[u8]>) -> Result<Self, ReliableError> {
-        let packet = *(reader.get_ref());
-
-        if packet.len() < 3 {
+    fn parse(reader: &Bytes) -> Result<Self, ReliableError> {
+        if reader.remaining() < 3 {
             error!("Packet too small for packet header (1)");
             return Err(ReliableError::PacketTooSmall);
         }
-        let prefix_byte = reader.read_u8()?;
+        let prefix_byte = reader.get_u8();
 
         if prefix_byte & 1 != 0 {
             error!("prefix byte does not indicate regular packet");
@@ -152,21 +148,21 @@ impl HeaderParser for PacketHeader {
 
         let ack: u16;
         let mut ack_bits: u32 = 0xFFFF_FFFF;
-        let sequence = reader.read_u16::<LittleEndian>()?;
+        let sequence = reader.get_u16_le();
 
         if prefix_byte & (1 << 5) != 0 {
-            if packet.len() < 4 {
+            if reader.remaining() < 4 {
                 error!("Packet too small for packet header (2)");
                 return Err(ReliableError::InvalidPacket);
             }
-            let sequence_difference = reader.read_u8()?;
+            let sequence_difference = reader.get_u8();
             ack = (Wrapping(sequence) - Wrapping(u16::from(sequence_difference))).0;
         } else {
-            if packet.len() < 5 {
+            if reader.remaining() < 5 {
                 error!("Packet too small for packet header (3)");
                 return Err(ReliableError::InvalidPacket);
             }
-            ack = reader.read_u16::<LittleEndian>()?;
+            ack = reader.get_u16_le();
         }
 
         let mut expected_bytes: usize = 0;
@@ -175,29 +171,29 @@ impl HeaderParser for PacketHeader {
                 expected_bytes += 1;
             }
         }
-        if packet.len() < reader.position() as usize + expected_bytes {
+        if reader.remaining() < expected_bytes {
             error!("Packet too small for packet header (4)");
             return Err(ReliableError::InvalidPacket);
         }
 
         if prefix_byte & (1 << 1) != 0 {
             ack_bits &= 0xFFFF_FF00;
-            ack_bits |= u32::from(reader.read_u8()?);
+            ack_bits |= u32::from(reader.get_u8());
         }
 
         if prefix_byte & (1 << 2) != 0 {
             ack_bits &= 0xFFFF_00FF;
-            ack_bits |= u32::from(reader.read_u8()?) << 8;
+            ack_bits |= u32::from(reader.get_u8()) << 8;
         }
 
         if prefix_byte & (1 << 3) != 0 {
             ack_bits &= 0xFF00_FFFF;
-            ack_bits |= u32::from(reader.read_u8()?) << 16;
+            ack_bits |= u32::from(reader.get_u8()) << 16;
         }
 
         if prefix_byte & (1 << 4) != 0 {
             ack_bits &= 0x00FF_FFFF;
-            ack_bits |= u32::from(reader.read_u8()?) << 24;
+            ack_bits |= u32::from(reader.get_u8()) << 24;
         }
 
         Ok(Self {
@@ -263,15 +259,21 @@ impl HeaderParser for FragmentHeader {
         }
     }
 
-    fn write(&self, writer: &mut std::io::Cursor<&mut [u8]>) -> Result<(), ReliableError> {
-        writer.write_u8(1)?;
-        writer.write_u16::<LittleEndian>(self.sequence)?;
-        writer.write_u8(self.id)?;
-        writer.write_u8(self.num_fragments)?;
+    fn write(&self, writer: &mut BytesMut) -> Result<(), ReliableError> {
+        if writer.remaining_mut() < 5 {
+            panic!("::write given too-small BytesMut");
+        }
+        writer.put_u8(1);
+        writer.put_u16_le(self.sequence);
+        writer.put_u8(self.id);
+        writer.put_u8(self.num_fragments);
 
         if self.id == 0 {
-            if self.packet_header.is_some() {
-                self.packet_header.as_ref().unwrap().write(writer)?;
+            if let Some(ref header) = self.packet_header {
+                if writer.remaining_mut() < header.size() {
+                    panic!("::write given too-small for packet header BytesMut");
+                }
+                header.write(writer);
             } else {
                 return Err(ReliableError::InvalidFragment);
             }
@@ -280,17 +282,18 @@ impl HeaderParser for FragmentHeader {
         Ok(())
     }
 
-    fn parse(reader: &mut std::io::Cursor<&[u8]>) -> Result<Self::T, ReliableError> {
-        //let packet_header = PacketHeader::default();
-
-        let prefix_byte = reader.read_u8()?;
+    fn parse(reader: &Bytes) -> Result<Self::T, ReliableError> {
+        let prefix_byte = reader.get_u8();
         if prefix_byte != 1 {
             panic!("Not a fragment packet");
         }
-
-        let sequence = reader.read_u16::<LittleEndian>()?;
-        let id = reader.read_u8()?;
-        let num_fragments = reader.read_u8()?;
+        if reader.remaining() < 4 {
+            error!("Packet too small for fragment packet header");
+            return Err(ReliableError::InvalidPacket);
+        }
+        let sequence = reader.get_u16_le();
+        let id = reader.get_u8();
+        let num_fragments = reader.get_u8();
 
         let mut r = Self {
             sequence,
@@ -299,6 +302,7 @@ impl HeaderParser for FragmentHeader {
             packet_header: None,
         };
 
+        // first of the fragment packets contains a header
         if id == 0 {
             r.packet_header = Some(PacketHeader::parse(reader)?);
         }
