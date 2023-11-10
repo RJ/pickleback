@@ -1,4 +1,3 @@
-use bytes::Buf;
 use log::*;
 
 use std::collections::VecDeque;
@@ -14,17 +13,15 @@ mod headers;
 pub use headers::HeaderParser as Header;
 pub use headers::PacketHeader;
 
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Bytes, BytesMut};
 
-pub const RELIABLE_MAX_PACKET_HEADER_BYTES: usize = 9;
-pub const RELIABLE_FRAGMENT_HEADER_BYTES: usize = 5;
+// pub const RELIABLE_MAX_PACKET_HEADER_BYTES: usize = 9;
+// pub const RELIABLE_FRAGMENT_HEADER_BYTES: usize = 5;
 
 #[derive(Clone)]
 pub struct EndpointConfig {
-    pub name: String,
     pub max_payload_size: usize,
     pub max_packet_size: usize,
-    pub ack_buffer_size: usize,
     pub sent_packets_buffer_size: usize,
     pub received_packets_buffer_size: usize,
     pub rtt_smoothing_factor: f32,
@@ -33,22 +30,11 @@ pub struct EndpointConfig {
     pub packet_header_size: usize,
 }
 
-impl EndpointConfig {
-    pub fn new(name: &str) -> Self {
-        Self {
-            name: name.to_string(),
-            ..Default::default()
-        }
-    }
-}
-
 impl Default for EndpointConfig {
     fn default() -> Self {
         Self {
-            name: "endpoint".to_string(),
             max_payload_size: 1014,
             max_packet_size: 1150,
-            ack_buffer_size: 256,
             sent_packets_buffer_size: 256,
             received_packets_buffer_size: 256,
             rtt_smoothing_factor: 0.0025,
@@ -74,9 +60,11 @@ impl SentData {
             acked: false,
         }
     }
+    #[allow(unused)]
     pub fn acked(&self) -> bool {
         self.acked
     }
+    #[allow(unused)]
     pub fn size(&self) -> usize {
         self.size
     }
@@ -92,6 +80,7 @@ impl Default for SentData {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct RecvData {
     time: f64,
@@ -135,7 +124,6 @@ pub struct Endpoint {
     time: f64,
     rtt: f32,
     config: EndpointConfig,
-    acks: Vec<u16>,
     sequence: i32,
     sent_buffer: SequenceBuffer<SentData>,
     recv_buffer: SequenceBuffer<RecvData>,
@@ -145,12 +133,10 @@ pub struct Endpoint {
 
 impl Endpoint {
     pub fn new(config: EndpointConfig, time: f64) -> Self {
-        trace!("Creating new endpoint named '{}'", config.name);
         Self {
             time,
             rtt: 0.0,
             config: config.clone(),
-            acks: Vec::with_capacity(config.ack_buffer_size),
             sequence: 0,
             sent_buffer: SequenceBuffer::with_capacity(config.sent_packets_buffer_size),
             recv_buffer: SequenceBuffer::with_capacity(config.received_packets_buffer_size),
@@ -159,9 +145,9 @@ impl Endpoint {
         }
     }
 
-    pub fn max_payload_size(&self) -> usize {
-        self.config.max_payload_size
-    }
+    // pub fn max_payload_size(&self) -> usize {
+    //     self.config.max_payload_size
+    // }
 
     /// draining iterator over packets in the outbox that we need to send over the network
     pub fn drain_packets_to_send(
@@ -170,10 +156,12 @@ impl Endpoint {
         self.outbox.drain(..)
     }
 
+    #[allow(unused)]
     pub fn config(&self) -> &EndpointConfig {
         &self.config
     }
 
+    #[allow(unused)]
     pub fn sent_info(&self, sent_handle: SentHandle) -> Option<&SentData> {
         self.sent_buffer.get(sent_handle.0)
     }
@@ -183,13 +171,14 @@ impl Endpoint {
     /// Returns SendHandle, a wrapper over the packet sequence number
     pub fn send(&mut self, payload: Bytes) -> Result<SentHandle, ReliableError> {
         if payload.len() > self.config.max_packet_size {
-            error!(
-                "Packet too large: Attempting to send {}, max={}",
+            panic!(
+                "Packet too large: Attempting to send {}, {:?} max={}\n{payload:?}",
                 payload.len(),
+                ReliableError::ExceededMaxPacketSize,
                 self.config.max_packet_size
             );
-            self.counters.packets_too_large_to_send += 1;
-            return Err(ReliableError::ExceededMaxPacketSize);
+            // self.counters.packets_too_large_to_send += 1;
+            // return Err(ReliableError::ExceededMaxPacketSize);
         }
 
         // Increment sequence
@@ -241,9 +230,8 @@ impl Endpoint {
                 let ack_sequence: u16 = (Wrapping(header.ack()) - Wrapping(i)).0;
 
                 if let Some(sent_data) = self.sent_buffer.get_mut(ack_sequence) {
-                    if !sent_data.acked && self.acks.len() < self.config.ack_buffer_size {
+                    if !sent_data.acked {
                         trace!("mark acked packet: {}", ack_sequence);
-                        self.acks.push(ack_sequence);
                         self.counters.packets_acked += 1;
                         sent_data.acked = true;
                         new_acks.push(SentHandle(ack_sequence));
@@ -272,20 +260,13 @@ impl Endpoint {
         self.time = time;
     }
 
+    #[allow(unused)]
     pub fn reset(&mut self) {
         self.sequence = 0;
-
-        self.acks.clear();
         self.sent_buffer.reset();
         self.recv_buffer.reset();
     }
-
-    pub fn next_sequence(&self) -> i32 {
-        self.sequence
-    }
-    pub fn acks(&self) -> &[u16] {
-        self.acks.as_slice()
-    }
+    #[allow(unused)]
     pub fn counters(&self) -> &EndpointCounters {
         &self.counters
     }
@@ -297,7 +278,7 @@ mod tests {
 
     use super::*;
     // explicit import to override bevy
-    use log::{debug, error, info, trace, warn};
+    use log::info;
 
     const TEST_ACKS_NUM_ITERATIONS: usize = 200;
     #[test]
@@ -307,8 +288,8 @@ mod tests {
         let mut time = 100.0;
         let test_data = Bytes::copy_from_slice(&[0x41; 24]); // "AAA..."
 
-        let mut one = Endpoint::new(EndpointConfig::new("one"), time);
-        let mut two = Endpoint::new(EndpointConfig::new("two"), time);
+        let mut one = Endpoint::new(EndpointConfig::default(), time);
+        let mut two = Endpoint::new(EndpointConfig::default(), time);
 
         let delta_time = 0.01;
         let mut one_sent = Vec::new();
@@ -346,6 +327,7 @@ mod tests {
     fn ack_bits() {
         crate::test_utils::init_logger();
 
+        #[allow(unused)]
         #[derive(Debug, Clone, Default)]
         struct TestData {
             sequence: u16,

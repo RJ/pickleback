@@ -1,5 +1,4 @@
 #[derive(Debug)]
-#[cfg_attr(feature = "cargo-clippy", allow(stutter))]
 pub enum ReliableError {
     Io(std::io::Error),
     ExceededMaxPacketSize,
@@ -7,7 +6,6 @@ pub enum ReliableError {
     PacketTooSmall,
     InvalidPacket,
     StalePacket,
-    InvalidFragment,
     InvalidMessage,
 }
 

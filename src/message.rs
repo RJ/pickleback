@@ -1,7 +1,6 @@
 use crate::ReliableError;
-// use bevy::log::*;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use log::{debug, error, info, trace, warn};
+use log::error;
 
 pub type MessageId = u32;
 pub type FragGroupId = u8;
@@ -30,7 +29,6 @@ pub enum MessageSizeMode {
 /// Messages are coalesced and written together into packets.
 /// each message has a header.
 /// they can be fragments of a larger message, which get reassembled.
-#[derive(Debug)]
 pub struct Message {
     id: MessageId,
     size_mode: MessageSizeMode,
@@ -39,11 +37,19 @@ pub struct Message {
     fragment: Option<Fragment>,
 }
 
-impl Message {
-    pub fn is_fragment(&self) -> bool {
-        self.fragment.is_some()
+impl std::fmt::Debug for Message {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Message{{id:{}, payload_len:{} fragment:{}}}",
+            self.id,
+            self.payload.len(),
+            self.fragment.is_some()
+        )
     }
+}
 
+impl Message {
     pub fn new_unfragmented(id: MessageId, channel: u8, payload: Bytes) -> Self {
         assert!(channel < 64, "max channel id is 64");
         assert!(payload.len() <= 1024, "max payload size is 1024");
@@ -124,7 +130,7 @@ impl Message {
                 (false, MessageSizeMode::Large) => 2,
                 // small fragmented
                 (true, MessageSizeMode::Small) => {
-                    2 + if self.fragment.as_ref().unwrap().is_last() {
+                    3 + if self.fragment.as_ref().unwrap().is_last() {
                         2
                     } else {
                         0
@@ -132,7 +138,7 @@ impl Message {
                 }
                 // large fragmented
                 (true, MessageSizeMode::Large) => {
-                    4 + if self.fragment.as_ref().unwrap().is_last() {
+                    5 + if self.fragment.as_ref().unwrap().is_last() {
                         2
                     } else {
                         0
@@ -140,22 +146,6 @@ impl Message {
                 }
             }
     }
-
-    // pub fn new_fragments(channel: u8, payload: Bytes) -> Self {
-    //     assert!(channel < 64, "max channel id is 64");
-    //     assert!(payload.len() <= 1024, "max unfragmented payload size is 1024");
-    //     let size_mode = if payload.len() > 255 {
-    //         MessageSizeMode::Large
-    //     } else {
-    //         MessageSizeMode::Small
-    //     };
-    //     Self {
-    //         size_mode,
-    //         channel,
-    //         payload,
-    //         fragment: None,
-    //     }
-    // }
 
     // TODO check reminaing and error if writes will panic
     pub fn write(&self, writer: &mut BytesMut) -> Result<(), ReliableError> {
@@ -252,7 +242,7 @@ impl Message {
                         error!("parse message error 5");
                         return Err(ReliableError::InvalidMessage);
                     }
-                    (reader.get_u16() as u16, reader.get_u16())
+                    (reader.get_u16(), reader.get_u16())
                 }
             };
             let payload_size = if fragment_id == num_fragments - 1 {
@@ -293,7 +283,7 @@ impl Message {
 mod tests {
     use super::*;
     // explicit import to override bevy
-    use log::{debug, error, info, trace, warn};
+    // use log::{debug, error, info, trace, warn};
 
     #[test]
     fn message_serialization() {

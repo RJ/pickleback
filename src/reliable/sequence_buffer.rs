@@ -1,5 +1,5 @@
 use crate::ReliableError;
-use log::*;
+// use log::*;
 use std::num::Wrapping;
 
 pub struct SequenceBuffer<T>
@@ -9,7 +9,7 @@ where
     entries: Vec<T>,
     entry_sequences: Vec<u32>,
     sequence: u16,
-    size: usize,
+    // size: usize,
 }
 
 impl<T> SequenceBuffer<T>
@@ -25,7 +25,7 @@ where
 
         Self {
             sequence: 0,
-            size,
+            // size,
             entries,
             entry_sequences,
         }
@@ -49,7 +49,6 @@ where
         Some(&mut self.entries[index])
     }
 
-    #[cfg_attr(feature = "cargo-clippy", allow(cast_possible_truncation))]
     pub fn insert(&mut self, data: T, sequence: u16) -> Result<&mut T, ReliableError> {
         if Self::sequence_less_than(
             sequence,
@@ -88,6 +87,7 @@ where
         self.entry_sequences[index] = 0xFFFF_FFFF;
     }
 
+    #[allow(unused)]
     pub fn reset(&mut self) {
         self.sequence = 0;
         for e in &mut self.entry_sequences {
@@ -103,28 +103,25 @@ where
         self.entries.len()
     }
 
+    #[allow(unused)]
     pub fn is_empty(&self) -> bool {
         self.len() > 0
     }
 
+    #[allow(unused)]
     pub fn capacity(&self) -> usize {
         self.entries.capacity()
     }
 
-    #[allow(unused)]
-    #[cfg_attr(
-        feature = "cargo-clippy",
-        allow(cast_possible_truncation, cast_sign_loss)
-    )]
     pub fn ack_bits(&self) -> (u16, u32) {
-        let ack = (Wrapping(self.sequence as u16) - Wrapping(1)).0;
+        let ack = (Wrapping(self.sequence) - Wrapping(1)).0;
         let mut ack_bits: u32 = 0;
         let mut mask: u32 = 1;
 
         for i in 0..33 {
-            let sequence = (Wrapping(ack) - Wrapping(i as u16)).0 as u16;
+            let sequence = (Wrapping(ack) - Wrapping(i as u16)).0;
 
-            if let Some(s) = self.get(sequence) {
+            if self.get(sequence).is_some() {
                 ack_bits |= mask;
             }
 
@@ -134,7 +131,6 @@ where
     }
 
     #[inline]
-    #[cfg_attr(feature = "cargo-clippy", allow(cast_possible_truncation))]
     fn index(&self, sequence: u16) -> usize {
         (sequence % self.entries.len() as u16) as usize
     }
@@ -149,7 +145,6 @@ where
     }
 
     #[inline]
-    #[cfg_attr(feature = "cargo-clippy", allow(cast_possible_truncation))]
     pub fn check_sequence(&self, sequence: u16) -> bool {
         Self::sequence_greater_than(
             sequence,

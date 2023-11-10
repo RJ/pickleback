@@ -64,6 +64,10 @@ impl SentFragMap {
         } else {
             false
         };
+        info!(
+            "unacked frags left for parent: {parent_message_id} = {:?} ",
+            self.m.get(&parent_message_id).unwrap()
+        );
         if ret {
             self.m.remove(&parent_message_id);
         }
@@ -115,6 +119,18 @@ impl MessageDispatcher {
         acked_ids
     }
 
+    fn next_frag_group_id(&mut self) -> u8 {
+        let ret = self.next_frag_group_id;
+        self.next_frag_group_id = self.next_frag_group_id.wrapping_add(1);
+        ret
+    }
+
+    fn next_message_id(&mut self) -> MessageId {
+        let ret = self.next_message_id;
+        self.next_message_id = self.next_message_id.wrapping_add(1);
+        ret
+    }
+
     /// takes a payload of any size and writes messages to the outbox queues.
     /// will fragment into multiple messages if payload is > 1024
     fn add(&mut self, payload: Bytes) -> MessageId {
@@ -133,18 +149,6 @@ impl MessageDispatcher {
         // put on reliable or unreliable q based on channel?
         self.q_unreliable.push_back(msg);
         id
-    }
-
-    fn next_frag_group_id(&mut self) -> u8 {
-        let ret = self.next_frag_group_id;
-        self.next_frag_group_id = self.next_frag_group_id.wrapping_add(1);
-        ret
-    }
-
-    fn next_message_id(&mut self) -> MessageId {
-        let ret = self.next_message_id;
-        self.next_message_id = self.next_message_id.wrapping_add(1);
-        ret
     }
 
     fn add_fragmented(&mut self, mut payload: Bytes) -> MessageId {
@@ -194,7 +198,7 @@ impl MessageDispatcher {
     /// removes and returns oldest message from queue within max_size constraint
     fn take_unreliable_message(&mut self, max_size: usize) -> Option<Message> {
         for index in 0..self.q_unreliable.len() {
-            if max_size > 0 && self.q_unreliable[index].size() > max_size {
+            if self.q_unreliable[index].size() > max_size {
                 continue;
             }
             return self.q_unreliable.remove(index);
@@ -276,7 +280,7 @@ impl MessageReassembler {
 
         if ret.is_some() {
             // resulted in a fully reassembled message, cleanup:
-            info!("Reassembly complete!");
+            info!("Reassembly complete for {fragment:?}");
             self.in_progress.remove(&fragment.group_id);
         }
 
@@ -366,19 +370,23 @@ impl Servent {
         // we just need to track which messages ids were in which packet sequence number.
         while !self.message_dispatcher.is_empty() {
             let mut message_handles_in_packet = Vec::<MessageHandle>::new();
-            info!("Allocated new packet to coalesce into.");
-            let mut packet = BytesMut::with_capacity(1124); // 1024 + headers etc.. should calculate exactly.
+            trace!("Allocated new packet to coalesce into.");
+            // max packet size something like 1150 bytes
+            let max_packet_size = self.endpoint.config().max_packet_size;
+            let mut packet = BytesMut::with_capacity(max_packet_size);
+            let mut remaining_space = max_packet_size;
             while let Some(msg) = self
                 .message_dispatcher
-                .take_unreliable_message(packet.spare_capacity_mut().len())
+                .take_unreliable_message(remaining_space)
             {
-                info!("* Writing {msg:?} to packet buffer..");
+                trace!("* Writing {msg:?} to packet buffer..");
                 msg.write(&mut packet)
                     .expect("writing to a buffer shouldn't fail");
                 message_handles_in_packet.push(MessageHandle {
                     id: msg.id(),
                     parent: msg.parent_id(),
                 });
+                remaining_space = max_packet_size - packet.len();
             }
             // now send this packet (ie, enqueue it in endpoint's outbox)
 
@@ -399,14 +407,17 @@ impl Servent {
     /// by parsing out the messages and yielding them to consumer.
     fn read_messages_from_received_packet_payload(&mut self, mut payload: Bytes) {
         // possibly just write to an inbox?
-        info!("process_received_packet: {payload:?}");
+        info!("process_received_packet, len: {}", payload.len());
         while payload.remaining() > 0 {
             match Message::parse(&mut payload) {
                 Ok(msg) => {
                     // in case it's a fragment, do reassembly.
                     // this just yields a ReceivedMessage instantly for non-fragments:
                     if let Some(received_msg) = self.message_reassembler.add_fragment(&msg) {
-                        info!("received message: {received_msg:?}");
+                        info!(
+                            "received complete message, len: {}",
+                            received_msg.payload.len()
+                        );
                         self.message_inbox.push_back(received_msg);
                     }
                 }
@@ -442,8 +453,10 @@ impl Servent {
                     let msg_acks = self
                         .message_dispatcher
                         .acked_packet_to_acked_messages(acked_handle);
-                    info!("NEW MSG ACKS (via packet ack of {acked_handle:?} = {msg_acks:?}");
-                    self.message_ack_inbox.extend(msg_acks.iter());
+                    if !msg_acks.is_empty() {
+                        info!("NEW MSG ACKS (via packet ack of {acked_handle:?} = {msg_acks:?}");
+                        self.message_ack_inbox.extend(msg_acks.iter());
+                    }
                 }
                 self.read_messages_from_received_packet_payload(payload);
             }
@@ -530,5 +543,47 @@ mod tests {
             vec![msg_id],
             server.drain_message_acks().collect::<Vec<_>>()
         );
+    }
+
+    fn random_payload(size: u32) -> Bytes {
+        use bytes::BufMut;
+        let mut b = BytesMut::with_capacity(size as usize);
+        for _ in 0..size {
+            b.put_u8(rand::random::<u8>());
+        }
+        b.freeze()
+    }
+
+    #[test]
+    fn soak_message_transmission() {
+        crate::test_utils::init_logger();
+        let mut server = Servent::new(1_f64);
+        let mut client = Servent::new(1_f64);
+
+        for _ in 0..10000 {
+            let size = rand::random::<u32>() % (1024 * 16);
+            let msg = random_payload(size);
+            let msg_id = server.send_message(msg.clone());
+            println!("💌 Sending message of size {size}, msg_id: {msg_id}");
+            server.write_packets_to_send();
+            server
+                .drain_packets_to_send()
+                .for_each(|packet| client.process_incoming_packet(packet));
+            let received_messages = client.drain_received_messages().collect::<Vec<_>>();
+            assert_eq!(received_messages.len(), 1);
+            assert_eq!(received_messages[0].payload, msg);
+
+            assert!(server.drain_message_acks().collect::<Vec<_>>().is_empty());
+
+            client.write_packets_to_send();
+            client
+                .drain_packets_to_send()
+                .for_each(|packet| server.process_incoming_packet(packet));
+
+            assert_eq!(
+                vec![msg_id],
+                server.drain_message_acks().collect::<Vec<_>>()
+            );
+        }
     }
 }

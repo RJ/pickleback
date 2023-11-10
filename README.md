@@ -1,4 +1,4 @@
-# Packeteeer
+# Packeteer
 
 **A transport layer atop unreliable datagram exchange**
 

@@ -137,7 +137,7 @@ impl HeaderParser for PacketHeader {
         Ok(())
     }
 
-    fn parse(mut reader: &mut Bytes) -> Result<Self, ReliableError> {
+    fn parse(reader: &mut Bytes) -> Result<Self, ReliableError> {
         if reader.remaining() < 3 {
             error!("Packet too small for packet header (1)");
             return Err(ReliableError::PacketTooSmall);
@@ -149,33 +149,35 @@ impl HeaderParser for PacketHeader {
             return Err(ReliableError::InvalidPacket);
         }
 
-        let ack: u16;
         let mut ack_bits: u32 = 0xFFFF_FFFF;
         let sequence = reader.get_u16_le();
         // ack is greatest seqno seen?
-        if prefix_byte & (1 << 5) != 0 {
-            if reader.remaining() < 4 {
+        let ack = if prefix_byte & (1 << 5) != 0 {
+            if reader.remaining() < 1 {
                 error!("Packet too small for packet header (2)");
                 return Err(ReliableError::InvalidPacket);
             }
             let sequence_difference = reader.get_u8();
-            ack = (Wrapping(sequence) - Wrapping(u16::from(sequence_difference))).0;
+            (Wrapping(sequence) - Wrapping(u16::from(sequence_difference))).0
         } else {
-            if reader.remaining() < 5 {
-                error!("Packet too small for packet header (3)");
+            if reader.remaining() < 2 {
+                error!(
+                    "Packet too small for packet header (3), remaining = {}",
+                    reader.remaining()
+                );
                 return Err(ReliableError::InvalidPacket);
             }
-            ack = reader.get_u16_le();
-        }
+            reader.get_u16_le()
+        };
 
-        let mut expected_bytes: usize = 0;
+        let mut expected_ack_bytes: usize = 0;
         for i in 1..5 {
             if prefix_byte & (1 << i) != 0 {
-                expected_bytes += 1;
+                expected_ack_bytes += 1;
             }
         }
-        if reader.remaining() < expected_bytes {
-            error!("Packet too small for packet header (4)");
+        if reader.remaining() < expected_ack_bytes {
+            error!("Packet too small for packet header (4) expected_ack_bytes: {expected_ack_bytes} remaining: {}", reader.remaining());
             return Err(ReliableError::InvalidPacket);
         }
 
