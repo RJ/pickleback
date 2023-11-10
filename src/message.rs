@@ -294,23 +294,10 @@ mod tests {
     use super::*;
     // explicit import to override bevy
     use log::{debug, error, info, trace, warn};
-    // use env_logger
-    use std::sync::Once;
-
-    static LOGGER_INIT: Once = Once::new();
-
-    fn enable_logging() {
-        LOGGER_INIT.call_once(|| {
-            use env_logger::Builder;
-            use log::LevelFilter;
-
-            Builder::new().filter(None, LevelFilter::Trace).init();
-        });
-    }
 
     #[test]
     fn message_serialization() {
-        enable_logging();
+        crate::test_utils::init_logger();
         let fragment_group_id = 0;
 
         let payload1 = Bytes::from_static("HELLO".as_bytes());
@@ -346,7 +333,7 @@ mod tests {
 
     #[test]
     fn fragment_message_serialization() {
-        enable_logging();
+        crate::test_utils::init_logger();
         let fragment_group_id = 0;
         // fragment messages (except the last) have a fixed size of 1024 bytes
         let payload = Bytes::copy_from_slice(&[41; 1024]);

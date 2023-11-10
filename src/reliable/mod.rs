@@ -1,5 +1,5 @@
-use bevy::log::*;
 use bytes::Buf;
+use log::*;
 
 use std::collections::VecDeque;
 use std::num::Wrapping;
@@ -298,24 +298,11 @@ mod tests {
     use super::*;
     // explicit import to override bevy
     use log::{debug, error, info, trace, warn};
-    // use env_logger
-    use std::sync::Once;
-
-    static LOGGER_INIT: Once = Once::new();
-
-    fn enable_logging() {
-        LOGGER_INIT.call_once(|| {
-            use env_logger::Builder;
-            use log::LevelFilter;
-
-            Builder::new().filter(None, LevelFilter::Trace).init();
-        });
-    }
 
     const TEST_ACKS_NUM_ITERATIONS: usize = 200;
     #[test]
     fn acks() {
-        enable_logging();
+        crate::test_utils::init_logger();
 
         let mut time = 100.0;
         let test_data = Bytes::copy_from_slice(&[0x41; 24]); // "AAA..."
@@ -357,7 +344,7 @@ mod tests {
 
     #[test]
     fn ack_bits() {
-        enable_logging();
+        crate::test_utils::init_logger();
 
         #[derive(Debug, Clone, Default)]
         struct TestData {
@@ -403,7 +390,7 @@ mod tests {
 
     #[test]
     fn sequence_test() {
-        enable_logging();
+        crate::test_utils::init_logger();
 
         #[derive(Debug, Clone, Default)]
         struct TestData {
@@ -447,7 +434,7 @@ mod tests {
 
     #[test]
     fn packet_header() {
-        enable_logging();
+        crate::test_utils::init_logger();
 
         let write_sequence = 10000;
         let write_ack = 100;

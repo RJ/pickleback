@@ -1,8 +1,7 @@
 use crate::ReliableError;
-use bevy::prelude::*;
+use log::*;
 use std::num::Wrapping;
 
-#[derive(Resource)]
 pub struct SequenceBuffer<T>
 where
     T: Default + std::clone::Clone + Send + Sync,

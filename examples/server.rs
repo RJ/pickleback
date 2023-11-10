@@ -1,6 +1,5 @@
-extern crate bevy_reparate;
-use bevy::prelude::*;
-use bevy_reparate::*;
+extern crate packeteer;
+use packeteer::*;
 
 fn main() {
     // let mut app = App::new();

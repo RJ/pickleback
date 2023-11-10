@@ -1,18 +1,13 @@
 mod reliable;
 
-// use bytes::{BufMut, BytesMut};
-use std::io::{Cursor, Write};
-use std::{collections::VecDeque, net::SocketAddr};
-// use anyhow::Result;
-// use bevy::prelude::*;
-use bevy::utils::hashbrown::hash_map::Entry;
-use bevy::utils::HashMap;
-use byteorder::{BigEndian, WriteBytesExt};
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 use log::*;
 use reliable::*;
+use std::collections::{hash_map::Entry, HashMap, VecDeque};
 mod message;
 use message::*;
+
+mod test_utils;
 
 /// You get a MessageHandle when you call `send_message(payload)`.
 /// It's only useful if you want to know if an ack was received for this message.
@@ -132,8 +127,7 @@ impl MessageDispatcher {
 
     fn add_unfragmented(&mut self, payload: Bytes) -> MessageId {
         assert!(payload.len() <= 1024);
-        let id = self.next_message_id;
-        self.next_message_id += 1;
+        let id = self.next_message_id();
         let channel = 0;
         let msg = Message::new_unfragmented(id, channel, payload);
         // put on reliable or unreliable q based on channel?
@@ -141,15 +135,25 @@ impl MessageDispatcher {
         id
     }
 
+    fn next_frag_group_id(&mut self) -> u8 {
+        let ret = self.next_frag_group_id;
+        self.next_frag_group_id = self.next_frag_group_id.wrapping_add(1);
+        ret
+    }
+
+    fn next_message_id(&mut self) -> MessageId {
+        let ret = self.next_message_id;
+        self.next_message_id = self.next_message_id.wrapping_add(1);
+        ret
+    }
+
     fn add_fragmented(&mut self, mut payload: Bytes) -> MessageId {
         assert!(payload.len() > 1024);
         // this is the message id we return to the user, upon which they await an ack.
-        let parent_id = self.next_message_id;
-        self.next_message_id += 1;
+        let parent_id = self.next_message_id();
         let payload_len = payload.len();
         let channel = 0;
-        let fragment_group_id = self.next_frag_group_id;
-        self.next_frag_group_id.wrapping_add(1);
+        let fragment_group_id = self.next_frag_group_id();
         // split into multiple messages.
         // track fragmented part message ids associated with the parent message ID which we return
         // so we can ack it once all fragment messages are acked.
@@ -163,8 +167,7 @@ impl MessageDispatcher {
                 1024
             };
             let frag_payload = payload.split_to(payload_size);
-            let fragment_message_id = self.next_message_id;
-            self.next_message_id += 1;
+            let fragment_message_id = self.next_message_id();
             info!("Adding frag msg parent:{parent_id} child:{fragment_message_id}  frag:{fragment_id}/{num_fragments}");
             let msg = Message::new_fragment(
                 fragment_message_id,
@@ -297,8 +300,6 @@ pub struct Servent {
 }
 
 /// Represents one end of a datagram stream between two peers, one of which is the server.
-///
-///      Servent (server) <---datagrams---> Servent (client)
 ///
 /// ultimately probably want channels, IDed by a u8. then we can have per-channel settings.
 /// eg ordering guarantees, reliability of messages, retransmit time, etc.
@@ -457,24 +458,11 @@ impl Servent {
 mod tests {
     use super::*;
     // explicit import to override bevy
-    use log::{debug, error, info, trace, warn};
-    // use env_logger
-    use std::sync::Once;
-
-    static LOGGER_INIT: Once = Once::new();
-
-    fn enable_logging() {
-        LOGGER_INIT.call_once(|| {
-            use env_logger::Builder;
-            use log::LevelFilter;
-
-            Builder::new().filter(None, LevelFilter::Trace).init();
-        });
-    }
+    // use log::{debug, error, info, trace, warn};
 
     #[test]
     fn small_unfrag_messages() {
-        enable_logging();
+        crate::test_utils::init_logger();
         let mut server = Servent::new(1_f64);
         let msg1 = Bytes::from_static(b"Hello");
         let msg2 = Bytes::from_static(b"world");
@@ -510,7 +498,7 @@ mod tests {
 
     #[test]
     fn frag_message() {
-        enable_logging();
+        crate::test_utils::init_logger();
         let mut server = Servent::new(1_f64);
         let mut msg = BytesMut::new();
         msg.extend_from_slice(&[65; 1024]);
@@ -532,7 +520,7 @@ mod tests {
         assert_eq!(received_messages.len(), 1);
         assert_eq!(received_messages[0].payload, msg);
 
-        // once client sends a message back to server, the acks will be send too
+        // once client sends a message back to server, the acks will be sent too
         client.write_packets_to_send();
         client
             .drain_packets_to_send()

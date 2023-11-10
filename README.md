@@ -1,9 +1,9 @@
-# Bevy Reparate
+# Packeteeer
+
+**A transport layer atop unreliable datagram exchange**
 
 This library expects you to marshall packets via an unreliable datagram exchange mechanism.
 In my case, webrtc unreliable datachannels.
-
-## Layers
 
 
 ### Packet Layer
