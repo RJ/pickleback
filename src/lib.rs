@@ -1,12 +1,13 @@
 mod reliable;
 
 use bytes::{Buf, Bytes, BytesMut};
+use jitter_pipe::JitterPipeConfig;
 use log::*;
 use reliable::*;
 use std::collections::{hash_map::Entry, HashMap, VecDeque};
 mod message;
 use message::*;
-
+pub mod jitter_pipe;
 mod test_utils;
 
 /// You get a MessageHandle when you call `send_message(payload)`.
@@ -469,6 +470,8 @@ impl Servent {
 
 #[cfg(test)]
 mod tests {
+    use crate::jitter_pipe::{JitterPipe, JitterPipeConfig};
+
     use super::*;
     // explicit import to override bevy
     // use log::{debug, error, info, trace, warn};
@@ -553,7 +556,7 @@ mod tests {
         }
         b.freeze()
     }
-
+    // TODO this isn't testing having multiple messages in flight yet? batch the sending and receiving?
     #[test]
     fn soak_message_transmission() {
         crate::test_utils::init_logger();
@@ -579,6 +582,50 @@ mod tests {
             client
                 .drain_packets_to_send()
                 .for_each(|packet| server.process_incoming_packet(packet));
+
+            assert_eq!(
+                vec![msg_id],
+                server.drain_message_acks().collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn soak_message_transmission_with_jitter_pipe() {
+        crate::test_utils::init_logger();
+        let mut server = Servent::new(1_f64);
+        let mut client = Servent::new(1_f64);
+
+        let mut server_jitter_pipe = JitterPipe::<Bytes>::new(JitterPipeConfig::disabled());
+        let mut client_jitter_pipe = JitterPipe::<Bytes>::new(JitterPipeConfig::disabled());
+
+        for _ in 0..10000 {
+            let size = rand::random::<u32>() % (1024 * 16);
+            let msg = random_payload(size);
+            let msg_id = server.send_message(msg.clone());
+            println!("💌 Sending message of size {size}, msg_id: {msg_id}");
+            server.write_packets_to_send();
+
+            server
+                .drain_packets_to_send()
+                .for_each(|packet| server_jitter_pipe.insert(packet));
+            while let Some(p) = server_jitter_pipe.take_next() {
+                client.process_incoming_packet(p);
+            }
+
+            let received_messages = client.drain_received_messages().collect::<Vec<_>>();
+            assert_eq!(received_messages.len(), 1);
+            assert_eq!(received_messages[0].payload, msg);
+
+            assert!(server.drain_message_acks().collect::<Vec<_>>().is_empty());
+
+            client.write_packets_to_send();
+            client
+                .drain_packets_to_send()
+                .for_each(|packet| client_jitter_pipe.insert(packet));
+            while let Some(p) = client_jitter_pipe.take_next() {
+                server.process_incoming_packet(p);
+            }
 
             assert_eq!(
                 vec![msg_id],
