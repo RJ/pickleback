@@ -4,11 +4,13 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use log::{debug, error, info, trace, warn};
 
 pub type MessageId = u32;
+pub type FragGroupId = u8;
 
 #[derive(Debug)]
-struct Fragment {
-    id: u16,
-    num_fragments: u16,
+pub(crate) struct Fragment {
+    pub group_id: FragGroupId,
+    pub id: u16,
+    pub num_fragments: u16,
     // parent_id only used sender-side
     parent_id: Option<MessageId>,
 }
@@ -38,6 +40,10 @@ pub struct Message {
 }
 
 impl Message {
+    pub fn is_fragment(&self) -> bool {
+        self.fragment.is_some()
+    }
+
     pub fn new_unfragmented(id: MessageId, channel: u8, payload: Bytes) -> Self {
         assert!(channel < 64, "max channel id is 64");
         assert!(payload.len() <= 1024, "max payload size is 1024");
@@ -59,6 +65,7 @@ impl Message {
         id: MessageId,
         channel: u8,
         payload: Bytes,
+        fragment_group_id: FragGroupId,
         fragment_id: u16,
         num_fragments: u16,
         parent_id: MessageId,
@@ -76,11 +83,16 @@ impl Message {
             channel,
             payload,
             fragment: Some(Fragment {
+                group_id: fragment_group_id,
                 id: fragment_id,
                 num_fragments,
                 parent_id: Some(parent_id),
             }),
         }
+    }
+
+    pub(crate) fn fragment(&self) -> Option<&Fragment> {
+        self.fragment.as_ref()
     }
 
     pub fn parent_id(&self) -> Option<MessageId> {
@@ -93,6 +105,13 @@ impl Message {
 
     pub fn id(&self) -> MessageId {
         self.id
+    }
+
+    pub fn channel(&self) -> u8 {
+        self.channel
+    }
+    pub fn payload(&self) -> &Bytes {
+        &self.payload
     }
 
     pub fn size(&self) -> usize {
@@ -152,28 +171,30 @@ impl Message {
 
         writer.put_u8(prefix_byte);
 
-        if let Some(Fragment {
-            id: fragment_id,
-            num_fragments,
-            parent_id: _,
-        }) = self.fragment
-        {
+        if let Some(fragment) = self.fragment.as_ref() {
+            writer.put_u8(fragment.group_id);
             match self.size_mode {
                 MessageSizeMode::Small => {
-                    writer.put_u8(fragment_id as u8);
-                    writer.put_u8(num_fragments as u8);
+                    writer.put_u8(fragment.id as u8);
+                    writer.put_u8(fragment.num_fragments as u8);
                 }
                 MessageSizeMode::Large => {
-                    writer.put_u16(fragment_id);
-                    writer.put_u16(num_fragments);
+                    writer.put_u16(fragment.id);
+                    writer.put_u16(fragment.num_fragments);
                 }
             }
             // only the last fragment has a payload size. others are 1024.
-            if fragment_id == num_fragments - 1 {
+            if fragment.is_last() {
                 assert!(self.payload.len() <= 1024);
                 writer.put_u16(self.payload.len() as u16);
             } else {
-                assert_eq!(self.payload.len(), 1024);
+                // TODO return error here? can we even get corrupted packets off our webrtc transport?
+                // do we get checksums for free?
+                assert_eq!(
+                    self.payload.len(),
+                    1024,
+                    "non-last frag packets should have payload size of 1024"
+                );
             }
         } else {
             match self.size_mode {
@@ -217,6 +238,7 @@ impl Message {
             };
             (None, payload_size)
         } else {
+            let group_id = reader.get_u8();
             let (fragment_id, num_fragments) = match size_mode {
                 MessageSizeMode::Small => {
                     if reader.remaining() < 2 {
@@ -244,6 +266,7 @@ impl Message {
             };
             (
                 Some(Fragment {
+                    group_id,
                     id: fragment_id,
                     num_fragments,
                     parent_id: None, // only used sender-side
@@ -288,23 +311,59 @@ mod tests {
     #[test]
     fn message_serialization() {
         enable_logging();
+        let fragment_group_id = 0;
 
         let payload1 = Bytes::from_static("HELLO".as_bytes());
-        let payload2 = Bytes::from_static("WORLD".as_bytes());
+        let payload2 = Bytes::from_static("FRAGMENTED".as_bytes());
+        let payload3 = Bytes::from_static("WORLD".as_bytes());
         let msg1 = Message::new_unfragmented(1, 0, payload1);
-        let msg2 = Message::new_unfragmented(2, 0, payload2);
+        // the last fragment can be a small msg that rides along with other unfragmented messages:
+        let msg2 = Message::new_fragment(3, 0, payload2, fragment_group_id, 0, 1, 99);
+        let msg3 = Message::new_unfragmented(2, 0, payload3);
 
         let mut buffer = BytesMut::with_capacity(1500);
         msg1.write(&mut buffer).unwrap();
         msg2.write(&mut buffer).unwrap();
+        msg3.write(&mut buffer).unwrap();
 
         let mut incoming = Bytes::copy_from_slice(&buffer[..]);
 
         let recv_msg1 = Message::parse(&mut incoming).unwrap();
         let recv_msg2 = Message::parse(&mut incoming).unwrap();
+        let recv_msg3 = Message::parse(&mut incoming).unwrap();
 
         assert!(incoming.is_empty());
         assert_eq!(recv_msg1.payload, msg1.payload);
         assert_eq!(recv_msg2.payload, msg2.payload);
+        assert_eq!(recv_msg3.payload, msg3.payload);
+
+        assert!(recv_msg1.fragment.is_none());
+        assert!(recv_msg2.fragment.is_some());
+        assert_eq!(recv_msg2.fragment.as_ref().unwrap().id, 0);
+        assert_eq!(recv_msg2.fragment.as_ref().unwrap().num_fragments, 1);
+        assert!(recv_msg3.fragment.is_none());
+    }
+
+    #[test]
+    fn fragment_message_serialization() {
+        enable_logging();
+        let fragment_group_id = 0;
+        // fragment messages (except the last) have a fixed size of 1024 bytes
+        let payload = Bytes::copy_from_slice(&[41; 1024]);
+        let msg = Message::new_fragment(0, 0, payload, fragment_group_id, 0, 10, 0);
+
+        let mut buffer = BytesMut::with_capacity(1500);
+        msg.write(&mut buffer).unwrap();
+
+        let mut incoming = Bytes::copy_from_slice(&buffer[..]);
+
+        let recv_msg = Message::parse(&mut incoming).unwrap();
+
+        assert!(incoming.is_empty());
+
+        assert_eq!(recv_msg.payload, msg.payload);
+        assert!(recv_msg.fragment.is_some());
+        assert_eq!(recv_msg.fragment.as_ref().unwrap().id, 0);
+        assert_eq!(recv_msg.fragment.as_ref().unwrap().num_fragments, 10);
     }
 }

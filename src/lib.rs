@@ -4,10 +4,12 @@ mod reliable;
 use std::io::{Cursor, Write};
 use std::{collections::VecDeque, net::SocketAddr};
 // use anyhow::Result;
-use bevy::prelude::*;
+// use bevy::prelude::*;
+use bevy::utils::hashbrown::hash_map::Entry;
 use bevy::utils::HashMap;
 use byteorder::{BigEndian, WriteBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use log::*;
 use reliable::*;
 mod message;
 use message::*;
@@ -33,6 +35,12 @@ impl MessageHandle {
     pub fn parent_id(&self) -> Option<MessageId> {
         self.parent
     }
+}
+
+#[derive(Debug)]
+pub struct ReceivedMessage {
+    pub channel: u8,
+    pub payload: Bytes,
 }
 
 /// tracks the unacked message ids assigned to fragments of a larger message id.
@@ -74,6 +82,7 @@ struct MessageDispatcher {
     q_unreliable: VecDeque<Message>,
     next_message_id: MessageId,
     sent_frag_map: SentFragMap,
+    next_frag_group_id: u8,
     messages_in_packets: HashMap<SentHandle, Vec<MessageHandle>>,
 }
 impl MessageDispatcher {
@@ -139,7 +148,8 @@ impl MessageDispatcher {
         self.next_message_id += 1;
         let payload_len = payload.len();
         let channel = 0;
-
+        let fragment_group_id = self.next_frag_group_id;
+        self.next_frag_group_id.wrapping_add(1);
         // split into multiple messages.
         // track fragmented part message ids associated with the parent message ID which we return
         // so we can ack it once all fragment messages are acked.
@@ -153,17 +163,19 @@ impl MessageDispatcher {
                 1024
             };
             let frag_payload = payload.split_to(payload_size);
-            let fragment_id = self.next_message_id;
+            let fragment_message_id = self.next_message_id;
             self.next_message_id += 1;
+            info!("Adding frag msg parent:{parent_id} child:{fragment_message_id}  frag:{fragment_id}/{num_fragments}");
             let msg = Message::new_fragment(
-                fragment_id,
+                fragment_message_id,
                 channel,
                 frag_payload,
+                fragment_group_id,
                 fragment_id as u16,
                 num_fragments as u16,
                 parent_id,
             );
-            fragment_ids.push(fragment_id);
+            fragment_ids.push(fragment_message_id);
             // put on reliable or unreliable q based on channel?
             self.q_unreliable.push_back(msg);
         }
@@ -188,11 +200,98 @@ impl MessageDispatcher {
     }
 }
 
+/// max fragments set to 1024 for now.
+/// could be a dynamically size vec based on num-fragments tho..
+struct IncompleteMessage {
+    channel: u8,
+    num_fragments: u16,
+    num_received_fragments: u16,
+    fragments: [Option<Bytes>; 1024],
+}
+
+impl IncompleteMessage {
+    fn new(channel: u8, num_fragments: u16) -> Self {
+        Self {
+            channel,
+            num_fragments,
+            num_received_fragments: 0,
+            fragments: std::array::from_fn(|_| None),
+        }
+    }
+    fn add_fragment(&mut self, fragment_id: u16, payload: Bytes) -> Option<ReceivedMessage> {
+        assert!(fragment_id < 1024);
+        if self.fragments[fragment_id as usize].is_none() {
+            self.fragments[fragment_id as usize] = Some(payload);
+            self.num_received_fragments += 1;
+            if self.num_received_fragments == self.num_fragments {
+                let size = (self.num_fragments as usize - 1) * 1024
+                    + self.fragments[self.num_fragments as usize - 1]
+                        .as_ref()
+                        .unwrap()
+                        .len();
+                let mut reassembled_payload = BytesMut::with_capacity(size);
+                for i in 0..self.num_fragments {
+                    reassembled_payload
+                        .extend_from_slice(self.fragments[i as usize].as_ref().unwrap());
+                }
+                return Some(ReceivedMessage {
+                    channel: self.channel,
+                    payload: reassembled_payload.freeze(),
+                });
+            }
+        }
+        None
+    }
+}
+
+#[derive(Default)]
+struct MessageReassembler {
+    in_progress: HashMap<FragGroupId, IncompleteMessage>,
+}
+
+impl MessageReassembler {
+    fn add_fragment(&mut self, message: &Message) -> Option<ReceivedMessage> {
+        let Some(fragment) = message.fragment() else {
+            return Some(ReceivedMessage {
+                channel: message.channel(),
+                payload: message.payload().clone(),
+            });
+        };
+
+        let ret = match self.in_progress.entry(fragment.group_id) {
+            Entry::Occupied(entry) => entry
+                .into_mut()
+                .add_fragment(fragment.id, message.payload().clone()),
+            Entry::Vacant(v) => {
+                let incomp_msg = v.insert(IncompleteMessage::new(
+                    message.channel(),
+                    fragment.num_fragments,
+                ));
+                incomp_msg.add_fragment(fragment.id, message.payload().clone())
+            }
+        };
+
+        if ret.is_some() {
+            // resulted in a fully reassembled message, cleanup:
+            info!("Reassembly complete!");
+            self.in_progress.remove(&fragment.group_id);
+        }
+
+        ret
+    }
+}
+
 pub struct Servent {
     endpoint: Endpoint,
     time: f64,
+    // messages parsed out of packets we received. channel and payload.
+    message_inbox: VecDeque<ReceivedMessage>,
     /// messages waiting to be coalesced into packets for sending
     message_dispatcher: MessageDispatcher,
+
+    message_ack_inbox: VecDeque<MessageId>,
+
+    message_reassembler: MessageReassembler,
     // received_packet_inbox:
     // reliable_message_outbox: VecDeque<(u32, &'s [u8])>,
 }
@@ -208,14 +307,33 @@ impl Servent {
     pub fn new(time: f64) -> Self {
         let endpoint_config = EndpointConfig {
             max_payload_size: 1024,
-            ..default()
+            ..Default::default()
         };
         let endpoint = Endpoint::new(endpoint_config, time);
         Self {
             endpoint,
             time,
             message_dispatcher: MessageDispatcher::default(),
+            message_inbox: VecDeque::new(),
+            message_ack_inbox: VecDeque::new(),
+            message_reassembler: MessageReassembler::default(),
         }
+    }
+
+    pub fn drain_packets_to_send(
+        &mut self,
+    ) -> std::collections::vec_deque::Drain<'_, bytes::Bytes> {
+        self.endpoint.drain_packets_to_send()
+    }
+
+    pub fn drain_received_messages(
+        &mut self,
+    ) -> std::collections::vec_deque::Drain<'_, ReceivedMessage> {
+        self.message_inbox.drain(..)
+    }
+
+    pub fn drain_message_acks(&mut self) -> std::collections::vec_deque::Drain<'_, MessageId> {
+        self.message_ack_inbox.drain(..)
     }
 
     /// enqueue a message to be sent in a packet.
@@ -232,7 +350,15 @@ impl Servent {
     // and reliables need to stick around even longer..
     //
     //
-    pub fn coalesce_and_send_messages(&mut self) {
+    pub fn write_packets_to_send(&mut self) {
+        // if no Messages to send, we'll still send an empty-payload packet, so that
+        // acks are transmitted.
+        // sending one empty packet per tick is fine.. right? what about uncapped headless server?
+        if self.message_dispatcher.is_empty() {
+            info!("No msgs. Sending empty packet, jsut for acks");
+            self.endpoint.send(Bytes::new()).unwrap();
+            return;
+        }
         // message ids aren't sent over the wire, the remote end doesn't care.
         // they are only used locally for tracking acks. we map packet-level acks back to
         // message ids, so we report messages acks to the consumer.
@@ -240,11 +366,10 @@ impl Servent {
         while !self.message_dispatcher.is_empty() {
             let mut message_handles_in_packet = Vec::<MessageHandle>::new();
             info!("Allocated new packet to coalesce into.");
-            let mut packet = BytesMut::with_capacity(1150); // 1024 + headers etc.. should calculate exactly.
-
+            let mut packet = BytesMut::with_capacity(1124); // 1024 + headers etc.. should calculate exactly.
             while let Some(msg) = self
                 .message_dispatcher
-                .take_unreliable_message(packet.remaining())
+                .take_unreliable_message(packet.spare_capacity_mut().len())
             {
                 info!("* Writing {msg:?} to packet buffer..");
                 msg.write(&mut packet)
@@ -254,7 +379,7 @@ impl Servent {
                     parent: msg.parent_id(),
                 });
             }
-            // now send this packet:
+            // now send this packet (ie, enqueue it in endpoint's outbox)
 
             match self.endpoint.send(packet.freeze()) {
                 Ok(handle) => {
@@ -270,10 +395,26 @@ impl Servent {
     }
 
     /// called after acks and headers stripped, we just process the payload
-    /// do we plug in some sort of packet state machine object here, or what?
-    fn process_received_packet(&mut self, payload: Bytes) {
+    /// by parsing out the messages and yielding them to consumer.
+    fn read_messages_from_received_packet_payload(&mut self, mut payload: Bytes) {
         // possibly just write to an inbox?
         info!("process_received_packet: {payload:?}");
+        while payload.remaining() > 0 {
+            match Message::parse(&mut payload) {
+                Ok(msg) => {
+                    // in case it's a fragment, do reassembly.
+                    // this just yields a ReceivedMessage instantly for non-fragments:
+                    if let Some(received_msg) = self.message_reassembler.add_fragment(&msg) {
+                        info!("received message: {received_msg:?}");
+                        self.message_inbox.push_back(received_msg);
+                    }
+                }
+                Err(err) => {
+                    error!("Error parsing messages from packet payload: {err:?}");
+                    break;
+                }
+            }
+        }
     }
 
     pub fn update(&mut self, dt: f64) {
@@ -301,12 +442,105 @@ impl Servent {
                         .message_dispatcher
                         .acked_packet_to_acked_messages(acked_handle);
                     info!("NEW MSG ACKS (via packet ack of {acked_handle:?} = {msg_acks:?}");
+                    self.message_ack_inbox.extend(msg_acks.iter());
                 }
-                self.process_received_packet(payload);
+                self.read_messages_from_received_packet_payload(payload);
             }
             Err(err) => {
                 warn!("incoming packet error {err:?}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // explicit import to override bevy
+    use log::{debug, error, info, trace, warn};
+    // use env_logger
+    use std::sync::Once;
+
+    static LOGGER_INIT: Once = Once::new();
+
+    fn enable_logging() {
+        LOGGER_INIT.call_once(|| {
+            use env_logger::Builder;
+            use log::LevelFilter;
+
+            Builder::new().filter(None, LevelFilter::Trace).init();
+        });
+    }
+
+    #[test]
+    fn small_unfrag_messages() {
+        enable_logging();
+        let mut server = Servent::new(1_f64);
+        let msg1 = Bytes::from_static(b"Hello");
+        let msg2 = Bytes::from_static(b"world");
+        let msg3 = Bytes::from_static(b"!");
+        server.send_message(msg1.clone());
+        server.send_message(msg2.clone());
+        server.send_message(msg3.clone());
+
+        server.write_packets_to_send();
+
+        let mut client = Servent::new(1_f64);
+        // deliver msgs from server to client
+        server
+            .drain_packets_to_send()
+            .for_each(|packet| client.process_incoming_packet(packet));
+
+        let received_messages = client.drain_received_messages().collect::<Vec<_>>();
+        assert_eq!(received_messages[0].payload, msg1);
+        assert_eq!(received_messages[1].payload, msg2);
+        assert_eq!(received_messages[2].payload, msg3);
+
+        // once client sends a message back to server, the acks will be send too
+        client.write_packets_to_send();
+        client
+            .drain_packets_to_send()
+            .for_each(|packet| server.process_incoming_packet(packet));
+
+        assert_eq!(
+            vec![0, 1, 2],
+            server.drain_message_acks().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn frag_message() {
+        enable_logging();
+        let mut server = Servent::new(1_f64);
+        let mut msg = BytesMut::new();
+        msg.extend_from_slice(&[65; 1024]);
+        msg.extend_from_slice(&[66; 1024]);
+        msg.extend_from_slice(&[67; 100]);
+        let msg = msg.freeze();
+
+        let msg_id = server.send_message(msg.clone());
+
+        server.write_packets_to_send();
+
+        let mut client = Servent::new(1_f64);
+        // deliver msgs from server to client
+        server
+            .drain_packets_to_send()
+            .for_each(|packet| client.process_incoming_packet(packet));
+
+        let received_messages = client.drain_received_messages().collect::<Vec<_>>();
+        assert_eq!(received_messages.len(), 1);
+        assert_eq!(received_messages[0].payload, msg);
+
+        // once client sends a message back to server, the acks will be send too
+        client.write_packets_to_send();
+        client
+            .drain_packets_to_send()
+            .for_each(|packet| server.process_incoming_packet(packet));
+
+        assert_eq!(
+            vec![msg_id],
+            server.drain_message_acks().collect::<Vec<_>>()
+        );
     }
 }

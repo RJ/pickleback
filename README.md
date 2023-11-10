@@ -5,7 +5,17 @@ In my case, webrtc unreliable datachannels.
 
 ## Layers
 
-seems like it could be a nice separation of concerns to have a bevy app that coalesces messages into packets,
-handles retransmissions, manages acking of messages, offers un/reliable messages.
+
+### Packet Layer
+
+fork of reliable, can only send packets under the mtu (no fragmenting).
+handles packet level acks.
+
+### Message Layer
+
+small messages are coalesced into packets, and acked per message to consumer.
+large messages are fragmented into multiple smaller messages and reassembled.
+
+
 
 

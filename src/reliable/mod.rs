@@ -23,6 +23,7 @@ pub const RELIABLE_FRAGMENT_HEADER_BYTES: usize = 5;
 pub struct EndpointConfig {
     pub name: String,
     pub max_payload_size: usize,
+    pub max_packet_size: usize,
     pub ack_buffer_size: usize,
     pub sent_packets_buffer_size: usize,
     pub received_packets_buffer_size: usize,
@@ -46,6 +47,7 @@ impl Default for EndpointConfig {
         Self {
             name: "endpoint".to_string(),
             max_payload_size: 1014,
+            max_packet_size: 1150,
             ack_buffer_size: 256,
             sent_packets_buffer_size: 256,
             received_packets_buffer_size: 256,
@@ -180,11 +182,11 @@ impl Endpoint {
     /// Payload must be within the max_payload_size - ie, under the MTU. No fragmenting here.
     /// Returns SendHandle, a wrapper over the packet sequence number
     pub fn send(&mut self, payload: Bytes) -> Result<SentHandle, ReliableError> {
-        if payload.len() > self.max_payload_size() {
+        if payload.len() > self.config.max_packet_size {
             error!(
                 "Packet too large: Attempting to send {}, max={}",
                 payload.len(),
-                self.max_payload_size()
+                self.config.max_packet_size
             );
             self.counters.packets_too_large_to_send += 1;
             return Err(ReliableError::ExceededMaxPacketSize);

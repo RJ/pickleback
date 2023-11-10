@@ -119,9 +119,13 @@ Also, when we create the fragment messages, we can send them all at once in a bu
 
 ## Fragmented Message
 
+need to take care with multiple frag groups in flight - ensure no overlap or we get old frags..
+also can probably pack frag group, id, num frags more concisely.
+
 | bytes  | type          | description                                              |
 | ------ | ------------- | -------------------------------------------------------- |
 | 1      | `u8`          | `MessagePrefixByte`                                      |
+| 1      | `u8`          | frag group id (same for all fragments in msg.)           |
 | 1 or 2 | `u8` or `u16` | fragment id, depending on small/large flag               |
 | 1 or 2 | `u8` or `u16` | num fragments, depending on small/large flag             |
 | 2      | `u16`         | Payload Length, only on last fragment_id. Rest are 1024. |
