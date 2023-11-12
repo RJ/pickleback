@@ -167,6 +167,7 @@ impl Packeteer {
     //
     //
     fn write_packets_to_send(&mut self) {
+        info!("write packets.");
         let mut sent_something = false;
 
         let mut message_handles_in_packet = Vec::<MessageHandle>::new();
@@ -377,7 +378,6 @@ mod tests {
             let msg = random_payload(size);
             let msg_id = server.send_message(channel, msg.clone());
             println!("💌 Sending message of size {size}, msg_id: {msg_id}");
-            server.write_packets_to_send();
             server
                 .drain_packets_to_send()
                 .for_each(|packet| client.process_incoming_packet(packet));
@@ -390,7 +390,6 @@ mod tests {
                 .collect::<Vec<_>>()
                 .is_empty());
 
-            client.write_packets_to_send();
             client
                 .drain_packets_to_send()
                 .for_each(|packet| server.process_incoming_packet(packet));

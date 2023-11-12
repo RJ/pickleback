@@ -41,10 +41,11 @@ impl std::fmt::Debug for Message {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Message{{id:{}, payload_len:{} fragment:{}}}",
+            "Message{{id:{}, payload_len:{} fragment:{} channel:{}}}",
             self.id,
             self.payload.len(),
-            self.fragment.is_some()
+            self.fragment.is_some(),
+            self.channel
         )
     }
 }
@@ -208,7 +209,7 @@ impl Message {
         } else {
             MessageSizeMode::Small
         };
-        let channel = prefix_byte << 2;
+        let channel = prefix_byte >> 2;
         let (fragment, payload_size) = if !fragmented {
             let payload_size = match size_mode {
                 MessageSizeMode::Small => {
@@ -293,10 +294,10 @@ mod tests {
         let payload1 = Bytes::from_static("HELLO".as_bytes());
         let payload2 = Bytes::from_static("FRAGMENTED".as_bytes());
         let payload3 = Bytes::from_static("WORLD".as_bytes());
-        let msg1 = Message::new_unfragmented(1, 0, payload1);
+        let msg1 = Message::new_unfragmented(1, 1, payload1);
         // the last fragment can be a small msg that rides along with other unfragmented messages:
-        let msg2 = Message::new_fragment(3, 0, payload2, fragment_group_id, 0, 1, 99);
-        let msg3 = Message::new_unfragmented(2, 0, payload3);
+        let msg2 = Message::new_fragment(3, 5, payload2, fragment_group_id, 0, 1, 99);
+        let msg3 = Message::new_unfragmented(2, 16, payload3);
 
         let mut buffer = BytesMut::with_capacity(1500);
         msg1.write(&mut buffer).unwrap();
@@ -313,6 +314,10 @@ mod tests {
         assert_eq!(recv_msg1.payload, msg1.payload);
         assert_eq!(recv_msg2.payload, msg2.payload);
         assert_eq!(recv_msg3.payload, msg3.payload);
+
+        assert_eq!(recv_msg1.channel(), msg1.channel());
+        assert_eq!(recv_msg2.channel(), msg2.channel());
+        assert_eq!(recv_msg3.channel(), msg3.channel());
 
         assert!(recv_msg1.fragment.is_none());
         assert!(recv_msg2.fragment.is_some());
