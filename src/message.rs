@@ -5,7 +5,7 @@ use log::error;
 pub type MessageId = u32;
 pub type FragGroupId = u8;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Fragment {
     pub group_id: FragGroupId,
     pub id: u16,
@@ -29,6 +29,7 @@ pub enum MessageSizeMode {
 /// Messages are coalesced and written together into packets.
 /// each message has a header.
 /// they can be fragments of a larger message, which get reassembled.
+#[derive(Clone)]
 pub struct Message {
     id: MessageId,
     size_mode: MessageSizeMode,

@@ -6,10 +6,12 @@ use reliable::*;
 use std::{
     collections::{hash_map::Entry, HashMap, VecDeque},
     mem::take,
+    time::Instant,
 };
 mod message;
 use message::*;
-// pub mod channel;
+pub mod channel;
+use channel::*;
 pub mod jitter_pipe;
 mod message_reassembler;
 mod test_utils;
@@ -21,86 +23,6 @@ use dispatcher::*;
 pub struct ReceivedMessage {
     pub channel: u8,
     pub payload: Bytes,
-}
-
-#[derive(Default)]
-pub(crate) struct ChannelList {
-    channels: HashMap<u8, Box<dyn Channel>>,
-}
-impl ChannelList {
-    pub fn get_mut(&mut self, id: u8) -> Option<&mut Box<dyn Channel>> {
-        self.channels.get_mut(&id)
-    }
-    fn put(&mut self, channel: Box<dyn Channel>) {
-        self.channels.insert(channel.id(), channel);
-    }
-    fn channels_mut(
-        &mut self,
-    ) -> std::collections::hash_map::ValuesMut<'_, u8, std::boxed::Box<(dyn Channel + 'static)>>
-    {
-        self.channels.values_mut()
-    }
-    fn any_with_messages_to_send(&self) -> bool {
-        for (_, channel) in self.channels.iter() {
-            if !channel.is_empty() {
-                return true;
-            }
-        }
-        false
-    }
-    // fn non_empty_channels_mut(
-    //     &mut self,
-    // ) -> std::collections::hash_map::ValuesMut<'_, u8, std::boxed::Box<(dyn Channel + 'static)>>
-    // {
-    //     self.channels.values_mut()
-    // }
-}
-trait Channel {
-    fn id(&self) -> u8;
-    fn update(&mut self, dt: f64);
-    fn is_empty(&self) -> bool;
-    /// enqueue a message to be sent in an outbound packet
-    fn enqueue_message(&mut self, msg: Message);
-    /// called when a message has been acked by the packet layer
-    fn message_ack_received(&mut self, message_id: MessageId);
-    /// get message ready to be coalesced into an outbound packet
-    fn get_message_to_write_to_a_packet(&mut self, max_size: usize) -> Option<Message>;
-}
-
-#[derive(Default)]
-struct UnreliableChannel {
-    time: f64,
-    id: u8,
-    q: VecDeque<Message>,
-}
-
-impl Channel for UnreliableChannel {
-    fn update(&mut self, dt: f64) {
-        self.time += dt;
-    }
-    fn enqueue_message(&mut self, msg: Message) {
-        assert_eq!(msg.channel(), self.id());
-        self.q.push_back(msg);
-    }
-    fn is_empty(&self) -> bool {
-        self.q.is_empty()
-    }
-    fn id(&self) -> u8 {
-        self.id
-    }
-    fn message_ack_received(&mut self, _: MessageId) {
-        // we don't care for unreliable channels?
-    }
-    // this removes after returning, but a reliable queue shouldn't until acked.
-    fn get_message_to_write_to_a_packet(&mut self, max_size: usize) -> Option<Message> {
-        for index in 0..self.q.len() {
-            if self.q[index].size() > max_size {
-                continue;
-            }
-            return self.q.remove(index);
-        }
-        None
-    }
 }
 
 pub struct Packeteer {
@@ -123,10 +45,8 @@ impl Packeteer {
         };
         let endpoint = Endpoint::new(endpoint_config, time);
         let mut channels = ChannelList::default();
-        channels.put(Box::new(UnreliableChannel {
-            id: 0,
-            ..Default::default()
-        }));
+        channels.put(Box::new(UnreliableChannel::new(0, time)));
+        channels.put(Box::new(ReliableChannel::new(1, time)));
         Self {
             endpoint,
             time,
@@ -179,8 +99,7 @@ impl Packeteer {
         while self.channels.any_with_messages_to_send() {
             info!("any with msg to send");
             // for all channels with messages to send:
-            'non_empty_channels: while let Some(channel) =
-                self.channels.channels_mut().find(|ch| !ch.is_empty())
+            'non_empty_channels: while let Some(channel) = self.channels.all_non_empty_mut().next()
             {
                 let mut any_found = false;
                 while let Some(msg) = channel.get_message_to_write_to_a_packet(remaining_space) {
@@ -233,10 +152,10 @@ impl Packeteer {
 
     pub fn update(&mut self, dt: f64) {
         self.time += dt;
-        self.endpoint.update(self.time);
+        self.endpoint.update(dt);
         // updating time for channels may result in reliable channels enqueuing messages
         // that need to be retransmitted.
-        for channel in self.channels.channels_mut() {
+        for channel in self.channels.all_mut() {
             channel.update(dt);
         }
     }
@@ -404,20 +323,25 @@ mod tests {
         let mut server = Packeteer::new(1_f64);
         let mut client = Packeteer::new(1_f64);
 
-        let channel = 0;
+        let channel = 1;
 
-        let mut server_jitter_pipe = JitterPipe::<Bytes>::new(JitterPipeConfig::disabled());
-        let mut client_jitter_pipe = JitterPipe::<Bytes>::new(JitterPipeConfig::disabled());
+        let mut server_jitter_pipe = JitterPipe::<Bytes>::new(JitterPipeConfig::default());
+        let mut client_jitter_pipe = JitterPipe::<Bytes>::new(JitterPipeConfig::default());
 
-        for _ in 0..10000 {
+        for i in 0..10 {
             let size = rand::random::<u32>() % (1024 * 16);
             let msg = random_payload(size);
             let msg_id = server.send_message(channel, msg.clone());
             println!("💌 Sending message of size {size}, msg_id: {msg_id}");
 
-            server
-                .drain_packets_to_send()
-                .for_each(|packet| server_jitter_pipe.insert(packet));
+            server.update(i as f64 * 0.051);
+            client.update(i as f64 * 0.051);
+
+            server.drain_packets_to_send().for_each(|packet| {
+                info!("{i} --server-->pipe");
+                server_jitter_pipe.insert(packet)
+            });
+
             while let Some(p) = server_jitter_pipe.take_next() {
                 client.process_incoming_packet(p);
             }

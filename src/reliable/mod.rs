@@ -2,6 +2,7 @@ use log::*;
 
 use std::collections::VecDeque;
 use std::num::Wrapping;
+use std::time::Instant;
 
 mod sequence_buffer;
 pub use sequence_buffer::SequenceBuffer;
@@ -256,8 +257,8 @@ impl Endpoint {
         Ok(received_packet)
     }
 
-    pub fn update(&mut self, time: f64) {
-        self.time = time;
+    pub fn update(&mut self, dt: f64) {
+        self.time += dt;
     }
 
     #[allow(unused)]
