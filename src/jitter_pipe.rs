@@ -2,6 +2,10 @@
 // not testing packet modification; assuming there are checksums so mangled packets manifest as drops.
 use std::{cmp::Ordering, collections::BinaryHeap};
 
+/// Packets are assigned a float sort key upon insert, based off a counter that increments +1.0
+/// for each packet sent. Jitter modifies the sort key by +/- . So Jitter under 0.5 will never
+/// cause packets to reorder, since packets with keys 1,2 with jitter of 0.4 will at worse become:
+/// 1.4, 1.6 but worst case jitter of 0.6 could be: 1.6, 1.4 which would cause a reorder.
 pub struct JitterPipeConfig {
     pub enabled: bool,
     pub drop_chance: f32,
