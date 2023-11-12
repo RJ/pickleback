@@ -295,8 +295,6 @@ mod tests {
         server.send_message(channel, msg2.clone());
         server.send_message(channel, msg3.clone());
 
-        server.write_packets_to_send();
-
         let mut client = Packeteer::new(1_f64);
         // deliver msgs from server to client
         server
@@ -309,7 +307,6 @@ mod tests {
         assert_eq!(received_messages[2].payload, msg3);
 
         // once client sends a message back to server, the acks will be send too
-        client.write_packets_to_send();
         client
             .drain_packets_to_send()
             .for_each(|packet| server.process_incoming_packet(packet));
@@ -417,7 +414,6 @@ mod tests {
             let msg = random_payload(size);
             let msg_id = server.send_message(channel, msg.clone());
             println!("💌 Sending message of size {size}, msg_id: {msg_id}");
-            server.write_packets_to_send();
 
             server
                 .drain_packets_to_send()
@@ -435,7 +431,6 @@ mod tests {
                 .collect::<Vec<_>>()
                 .is_empty());
 
-            client.write_packets_to_send();
             client
                 .drain_packets_to_send()
                 .for_each(|packet| client_jitter_pipe.insert(packet));
