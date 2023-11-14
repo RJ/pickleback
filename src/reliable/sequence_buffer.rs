@@ -102,17 +102,14 @@ where
         // are we inserting with a gap in the range? ie new sequence we are inserting at
         // is more than 1 greater than the current max sequence?
         // if Self::sequence_greater_than((Wrapping(sequence) + Wrapping(1)).0, self.sequence) {
-        let next_natural_sequence = (Wrapping(self.sequence) + Wrapping(1)).0;
-        if Self::sequence_greater_than(sequence, next_natural_sequence) {
+        if Self::sequence_greater_than(sequence, self.sequence) {
             // log::warn!(
             //     "{} Removing range during insert of {sequence}, current sequence is {}",
             //     self.type_name(),
             //     self.sequence
             // );
-            self.remove_range(next_natural_sequence..sequence);
-        }
-
-        if Self::sequence_greater_than(sequence, self.sequence) {
+            let first_candidate = (Wrapping(self.sequence) + Wrapping(1)).0;
+            self.remove_range(first_candidate..sequence);
             self.sequence = sequence;
         }
 
