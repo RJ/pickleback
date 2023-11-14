@@ -28,6 +28,24 @@ impl Default for JitterPipeConfig {
 }
 
 impl JitterPipeConfig {
+    pub fn bad() -> Self {
+        Self {
+            enabled: true,
+            drop_chance: 0.05,
+            duplicate_chance: 0.005,
+            max_jitter: 2.0,
+        }
+    }
+
+    pub fn terrible() -> Self {
+        Self {
+            enabled: true,
+            drop_chance: 0.075,
+            duplicate_chance: 0.01,
+            max_jitter: 5.0,
+        }
+    }
+
     #[allow(unused)]
     pub fn disabled() -> Self {
         Self {

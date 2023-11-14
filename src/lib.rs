@@ -383,17 +383,15 @@ mod tests {
         assert!(to_send[0].len() < 50);
     }
 
-    const NUM_TEST_MSGS: usize = 100;
-    const NUM_EXTRA_ITERATIONS: usize = 20;
+    const NUM_TEST_MSGS: usize = 1000000;
+    // extras are to ensure and resends / acks actually can be retransmitted
+    const NUM_EXTRA_ITERATIONS: usize = 100;
 
-    // the reason this is failing is due to losses reliable messages get retransmitted before acks
-    // arrived to stop it, so we get multiple deliveries. and no msg id to dedupe on at receiver.
-    // reliable mesages need a unique id? so do ordered messages.. unreliables don't.
     #[test]
     fn soak_message_transmission_with_jitter_pipe() {
         crate::test_utils::init_logger();
         let channel = 1;
-        let mut harness = TestHarness::new(JitterPipeConfig::default());
+        let mut harness = TestHarness::new(JitterPipeConfig::terrible());
 
         let mut test_msgs = Vec::new();
         (0..NUM_TEST_MSGS)
