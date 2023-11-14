@@ -137,7 +137,7 @@ impl Channel for UnreliableChannel {
             return false;
         }
         if self.seen_buf.exists(msg.id()) {
-            warn!("Rejecting already seen message on channel {msg:?}");
+            // warn!("Rejecting already seen message on channel {msg:?}");
             return false;
         }
         match self.seen_buf.insert(true, msg.id()) {
@@ -209,7 +209,7 @@ pub(crate) struct ReliableChannel {
     pub(crate) id: u8,
     q: VecDeque<ResendableMessage>,
     resend_time: f64,
-    // seen_buf: SequenceBuffer<bool>,
+    seen_buf: SequenceBuffer<bool>,
 }
 
 impl ReliableChannel {
@@ -219,7 +219,7 @@ impl ReliableChannel {
             time,
             q: VecDeque::default(),
             resend_time: 0.1,
-            // seen_buf: SequenceBuffer::with_capacity(10000),
+            seen_buf: SequenceBuffer::with_capacity(10000),
         }
     }
 }
@@ -228,8 +228,22 @@ impl Channel for ReliableChannel {
     fn update(&mut self, dt: f64) {
         self.time += dt;
     }
-    fn accepts_message(&mut self, _msg: &Message) -> bool {
-        true
+    fn accepts_message(&mut self, msg: &Message) -> bool {
+        if !self.seen_buf.check_sequence(msg.id()) {
+            warn!("Rejecting too-old message on chanel {msg:?}");
+            return false;
+        }
+        if self.seen_buf.exists(msg.id()) {
+            // warn!("Rejecting already seen message on channel {msg:?}");
+            return false;
+        }
+        match self.seen_buf.insert(true, msg.id()) {
+            Ok(_) => true,
+            Err(e) => {
+                warn!("not accepting message {msg:?} = {e:?}");
+                false
+            }
+        }
     }
     fn enqueue_message(&mut self, id: MessageId, payload: Bytes, fragmented: message::Fragmented) {
         let msg = Message::new(id, self.id(), payload, fragmented);
@@ -255,7 +269,7 @@ impl Channel for ReliableChannel {
             }
             if re_msg.is_ready(self.time, self.resend_time) {
                 if re_msg.last_sent.is_some() {
-                    // info!("resending.. {:?}", re_msg.message.fragment());
+                    info!("resending.. {:?}", re_msg.message.fragment());
                 }
                 re_msg.last_sent = Some(self.time);
                 return Some(re_msg.message.clone());
@@ -267,7 +281,7 @@ impl Channel for ReliableChannel {
 
 #[cfg(test)]
 mod tests {
-    use crate::jitter_pipe::{JitterPipe, JitterPipeConfig};
+    // use crate::jitter_pipe::JitterPipeConfig;
 
     use super::*;
     // explicit import to override bevy

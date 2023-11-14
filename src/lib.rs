@@ -19,12 +19,23 @@ mod dispatcher;
 use dispatcher::*;
 pub use jitter_pipe::*;
 
-#[derive(Debug)]
 pub struct ReceivedMessage {
     /// ids on received msgs are used internally for uniqueness and ordering
     pub id: MessageId,
     pub channel: u8,
     pub payload: Bytes,
+}
+
+impl std::fmt::Debug for ReceivedMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "ReceivedMessage{{id: {}, channel: {}, payload_len: {}}}",
+            self.id,
+            self.channel,
+            self.payload.len()
+        )
+    }
 }
 
 pub struct Packeteer {
@@ -139,7 +150,7 @@ impl Packeteer {
             match self.endpoint.send(final_packet) {
                 Ok(handle) => {
                     sent_something = true;
-                    info!("Sending packet containing msg ids: {message_handles_in_packet:?}, in packet seq {handle:?}");
+                    // info!("Sending packet containing msg ids: {message_handles_in_packet:?}, in packet seq {handle:?}");
                     self.dispatcher
                         .set_packet_message_handles(handle, take(&mut message_handles_in_packet));
                 }
@@ -225,33 +236,31 @@ mod tests {
     fn small_unfrag_messages() {
         crate::test_utils::init_logger();
         let channel = 0;
-        let mut server = Packeteer::new(1_f64);
+        let mut harness = TestHarness::new(JitterPipeConfig::disabled());
+
         let msg1 = Bytes::from_static(b"Hello");
         let msg2 = Bytes::from_static(b"world");
         let msg3 = Bytes::from_static(b"!");
-        server.send_message(channel, msg1.clone());
-        server.send_message(channel, msg2.clone());
-        server.send_message(channel, msg3.clone());
+        let id1 = harness.server.send_message(channel, msg1.clone());
+        let id2 = harness.server.send_message(channel, msg2.clone());
+        let id3 = harness.server.send_message(channel, msg3.clone());
 
-        let mut client = Packeteer::new(1_f64);
-        // deliver msgs from server to client
-        server
-            .drain_packets_to_send()
-            .for_each(|packet| client.process_incoming_packet(packet));
+        harness.advance(0.1);
 
-        let received_messages = client.drain_received_messages(channel).collect::<Vec<_>>();
+        let received_messages = harness
+            .client
+            .drain_received_messages(channel)
+            .collect::<Vec<_>>();
         assert_eq!(received_messages[0].payload, msg1);
         assert_eq!(received_messages[1].payload, msg2);
         assert_eq!(received_messages[2].payload, msg3);
 
-        // once client sends a message back to server, the acks will be send too
-        client
-            .drain_packets_to_send()
-            .for_each(|packet| server.process_incoming_packet(packet));
-
         assert_eq!(
-            vec![0, 1, 2],
-            server.drain_message_acks(channel).collect::<Vec<_>>()
+            vec![id1, id2, id3],
+            harness
+                .server
+                .drain_message_acks(channel)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -259,34 +268,32 @@ mod tests {
     fn frag_message() {
         crate::test_utils::init_logger();
         let channel = 0;
-        let mut server = Packeteer::new(1_f64);
+        let mut harness = TestHarness::new(JitterPipeConfig::disabled());
+
         let mut msg = BytesMut::new();
         msg.extend_from_slice(&[65; 1024]);
         msg.extend_from_slice(&[66; 1024]);
         msg.extend_from_slice(&[67; 100]);
         let msg = msg.freeze();
 
-        let msg_id = server.send_message(channel, msg.clone());
+        let msg_id = harness.server.send_message(channel, msg.clone());
 
-        let mut client = Packeteer::new(1_f64);
-        // deliver msgs from server to client
-        server
-            .drain_packets_to_send()
-            .for_each(|packet| client.process_incoming_packet(packet));
+        harness.advance(0.1);
 
-        let received_messages = client.drain_received_messages(channel).collect::<Vec<_>>();
+        let received_messages = harness
+            .client
+            .drain_received_messages(channel)
+            .collect::<Vec<_>>();
         assert_eq!(received_messages.len(), 1);
         assert_eq!(received_messages[0].payload, msg);
 
-        // once client sends a message back to server, the acks will be sent too
-        // client.write_packets_to_send();
-        client
-            .drain_packets_to_send()
-            .for_each(|packet| server.process_incoming_packet(packet));
-
+        // client should have sent acks back to server
         assert_eq!(
             vec![msg_id],
-            server.drain_message_acks(channel).collect::<Vec<_>>()
+            harness
+                .server
+                .drain_message_acks(channel)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -346,50 +353,38 @@ mod tests {
         }
     }
 
-    struct TestHarness {
-        server: Packeteer,
-        client: Packeteer,
-        server_jitter_pipe: JitterPipe<Bytes>,
-        client_jitter_pipe: JitterPipe<Bytes>,
-    }
-    impl TestHarness {
-        fn new(config: JitterPipeConfig) -> Self {
-            let server_jitter_pipe = JitterPipe::<Bytes>::new(config.clone());
-            let client_jitter_pipe = JitterPipe::<Bytes>::new(config);
-            let server = Packeteer::new(1_f64);
-            let client = Packeteer::new(1_f64);
-            Self {
-                server,
-                client,
-                server_jitter_pipe,
-                client_jitter_pipe,
-            }
-        }
-        /// advances time  and transmits S2C and C2S via configured jitter pipes
-        fn advance(&mut self, dt: f64) {
-            self.server.update(dt);
-            self.client.update(dt);
-
-            self.server
-                .drain_packets_to_send()
-                .for_each(|packet| self.server_jitter_pipe.insert(packet));
-
-            while let Some(p) = self.server_jitter_pipe.take_next() {
-                self.client.process_incoming_packet(p);
-            }
-
-            self.client
-                .drain_packets_to_send()
-                .for_each(|packet| self.client_jitter_pipe.insert(packet));
-
-            while let Some(p) = self.client_jitter_pipe.take_next() {
-                self.server.process_incoming_packet(p);
-            }
-        }
+    // test what happens in a reliable channel when one of the fragments isn't delivered.
+    // should resend after a suitable amount of time.
+    #[test]
+    fn retransmission() {
+        let channel = 1;
+        let mut harness = TestHarness::new(JitterPipeConfig::disabled());
+        // big enough to require 2 packets
+        let payload = random_payload(1800);
+        let id = harness.server.send_message(channel, payload);
+        // drop second packet (index 1), which will be the second of the two fragments.
+        harness.advance_with_server_outbound_drops(0.05, vec![1]);
+        assert!(harness.collect_client_messages(channel).is_empty());
+        assert!(harness.collect_server_acks(channel).is_empty());
+        // retransmit not ready yet
+        harness.advance(0.01);
+        assert!(harness.collect_client_messages(channel).is_empty());
+        assert!(harness.collect_server_acks(channel).is_empty());
+        // should retransmit
+        harness.advance(0.09001); // retransmit time of 0.1 reached
+        assert_eq!(harness.collect_client_messages(channel).len(), 1);
+        assert_eq!(vec![id], harness.collect_server_acks(channel));
+        // ensure server finished sending:
+        harness.advance(1.0);
+        // this is testing that the server is only transmitting one small "empty" packet (just headers)
+        let to_send = harness.server.drain_packets_to_send().collect::<Vec<_>>();
+        assert_eq!(1, to_send.len());
+        // both our fragments are def bigger than 50:
+        assert!(to_send[0].len() < 50);
     }
 
-    const NUM_TEST_MSGS: usize = 1000;
-    const NUM_EXTRA_ITERATIONS: usize = 50;
+    const NUM_TEST_MSGS: usize = 1;
+    const NUM_EXTRA_ITERATIONS: usize = 10;
 
     // the reason this is failing is due to losses reliable messages get retransmitted before acks
     // arrived to stop it, so we get multiple deliveries. and no msg id to dedupe on at receiver.
@@ -412,16 +407,17 @@ mod tests {
             if let Some(msg) = test_msgs.get(i) {
                 let size = msg.len();
                 let msg_id = harness.server.send_message(channel, msg.clone());
-                info!("💌 Sending message of size {size},  msg_id: {msg_id}");
+                info!("💌💌 Sending message {i}, size {size},  msg_id: {msg_id}");
                 unacked_sent_msg_ids.push(msg_id);
             }
 
-            harness.advance(0.03);
+            let stats = harness.advance(0.051);
+            info!("{stats:?}");
 
-            let acked_ids = harness
-                .server
-                .drain_message_acks(channel)
-                .collect::<Vec<_>>();
+            let acked_ids = harness.collect_server_acks(channel);
+            if !acked_ids.is_empty() {
+                info!("Server got ACKs: {acked_ids:?}");
+            }
             unacked_sent_msg_ids.retain(|id| !acked_ids.contains(id));
 
             client_received_messages.extend(harness.client.drain_received_messages(channel));

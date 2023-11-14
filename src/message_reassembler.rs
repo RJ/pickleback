@@ -37,7 +37,7 @@ use crate::*;
 ///
 /// max fragments set to 1024 for now.
 /// could be a dynamically size vec based on num-fragments tho..
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct IncompleteMessage {
     channel: u8,
     id: MessageId,
@@ -45,6 +45,8 @@ pub(crate) struct IncompleteMessage {
     num_received_fragments: u16,
     fragments: [Option<Bytes>; 1024], // TODO make vec
 }
+
+// TODO i think it's resending every fragment if the parent isn't acked yet?
 
 impl IncompleteMessage {
     pub(crate) fn new(channel: u8, id: MessageId, num_fragments: u16) -> Self {
@@ -129,10 +131,9 @@ impl MessageReassembler {
 
         if ret.is_some() {
             // resulted in a fully reassembled message, cleanup:
-            info!("🧩 Reassembly complete for {fragment:?}");
-            self.in_progress.remove(&message.id());
+            info!("🧩 Reassembly complete for {parent_id}, having just received {fragment:?} ");
+            self.in_progress.remove(&parent_id);
         }
-
         ret
     }
 }

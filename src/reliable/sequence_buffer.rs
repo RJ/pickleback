@@ -31,6 +31,10 @@ where
         }
     }
 
+    fn type_name(&self) -> &str {
+        std::any::type_name::<T>()
+    }
+
     // #[allow(unused)]
     // pub fn reset(&mut self) {
     //     self.sequence = 0;
@@ -63,28 +67,59 @@ where
         Some(&mut self.entries[index])
     }
 
+    /*
+       the range removal thing is not what i want.
+       it assumes the buffer ahead of most recently inserted sequence is junk, and wipes it
+       when inserting anything greater than last inserted seq + 1.
+
+       so if you insert in the following order of packet arrival:
+       1,
+       2,
+       3
+       4,
+       8, (wipes 5,6,7,8, because current seq is 4)
+       6,
+       9, (wipes 7,8,9 because current seq is 6)
+
+       you lose 6. (and 6 doesn't get included in the ack_bits)
+
+       maybe better to just drag a deletion window u16::MAX/2 wide, u16::MAX/2 behind us?
+
+    */
     pub fn insert(&mut self, data: T, sequence: u16) -> Result<&mut T, ReliableError> {
         if Self::sequence_less_than(
             sequence,
             (Wrapping(self.sequence) - Wrapping(self.len() as u16)).0,
         ) {
             // too old to insert. rename error to "SequnceTooOld"?
+            log::warn!(
+                "{} Sequence too old to insert: {sequence}",
+                self.type_name()
+            );
             return Err(ReliableError::SequenceBufferFull);
         }
+        log::info!("{} Inserting {sequence}..", self.type_name());
         // are we inserting with a gap in the range? ie new sequence we are inserting at
         // is more than 1 greater than the current max sequence?
         // if Self::sequence_greater_than((Wrapping(sequence) + Wrapping(1)).0, self.sequence) {
         let next_natural_sequence = (Wrapping(self.sequence) + Wrapping(1)).0;
         if Self::sequence_greater_than(sequence, next_natural_sequence) {
+            // log::warn!(
+            //     "{} Removing range during insert of {sequence}, current sequence is {}",
+            //     self.type_name(),
+            //     self.sequence
+            // );
             self.remove_range(next_natural_sequence..sequence);
         }
 
-        self.sequence = sequence;
+        if Self::sequence_greater_than(sequence, self.sequence) {
+            self.sequence = sequence;
+        }
 
-        let index = self.index(self.sequence);
+        let index = self.index(sequence);
 
         self.entries[index] = data;
-        self.entry_sequences[index] = u32::from(self.sequence);
+        self.entry_sequences[index] = u32::from(sequence);
 
         Ok(&mut self.entries[index])
     }
@@ -92,8 +127,10 @@ where
     // TODO: THIS IS INCLUSIVE END
     pub fn remove_range(&mut self, range: std::ops::Range<u16>) {
         for i in range.clone() {
+            log::warn!("{} * Remove {i} ", self.type_name());
             self.remove(i);
         }
+        log::warn!("{} * Remove {} ", self.type_name(), range.end);
         self.remove(range.end);
     }
 
@@ -158,5 +195,28 @@ where
             sequence,
             (Wrapping(self.sequence()) - Wrapping(self.len() as u16)).0,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::*;
+    use log::info;
+
+    #[test]
+    fn gappy_inserts() {
+        init_logger();
+        let mut buf = SequenceBuffer::<u16>::with_capacity(100);
+        for i in 0..5_u16 {
+            buf.insert(i, i).unwrap();
+        }
+        buf.insert(6, 6).unwrap(); // removes 5,6, inserts 6
+        buf.insert(5, 5).unwrap();
+        buf.insert(7, 7).unwrap(); // removes 6,7, inserts 7
+
+        for i in 0..8_u16 {
+            assert_eq!(Some(&i), buf.get(i));
+        }
     }
 }

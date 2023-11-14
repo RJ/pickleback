@@ -1,3 +1,5 @@
+use std::default;
+
 use crate::*;
 // use log::*;
 
@@ -31,11 +33,11 @@ pub(crate) struct MessageDispatcher {
 impl MessageDispatcher {
     // pass in msgs parsed from received network packets.
     pub(crate) fn process_received_message(&mut self, msg: Message) {
-        // info!("Dispatcher::process_received_message: {msg:?}");
+        info!("Dispatcher::process_received_message: {msg:?}");
         // in case it's a fragment, do reassembly.
         // this just yields a ReceivedMessage instantly for non-fragments:
         if let Some(received_msg) = self.message_reassembler.add_fragment(&msg) {
-            info!("✅ Adding message to inbox {msg:?}",);
+            info!("✅ Adding message to inbox {received_msg:?}",);
             self.message_inbox
                 .entry(received_msg.channel)
                 .or_default()
@@ -76,27 +78,30 @@ impl MessageDispatcher {
         // check message handles that were just acked - if any are fragments, we need to log that
         // in the frag map, incase it results in a parent message id being acked (ie, all frag messages are now acked)
         if let Some(msg_handles) = self.messages_in_packets.remove(packet_handle) {
+            info!("Acked packet: {packet_handle:?} --> acked msgs: {msg_handles:?}");
             for msg_handle in &msg_handles {
+                // let channel know, so it doesn't retransmit this message:
+                channel_list
+                    .get_mut(msg_handle.channel)
+                    .unwrap()
+                    .message_ack_received(msg_handle);
                 if let Some(parent_id) = msg_handle.parent_id() {
                     // fragment message
-                    if self
-                        .sent_frag_map
-                        .ack_fragment_message(parent_id, msg_handle.id())
-                    {
-                        channel_list
-                            .get_mut(msg_handle.channel)
-                            .unwrap()
-                            .message_ack_received(msg_handle);
+                    if self.sent_frag_map.ack_fragment_message(
+                        parent_id,
+                        msg_handle
+                            .frag_index
+                            .expect("used to calc parent id, so must exist"),
+                    ) {
                         self.ack_inbox
                             .entry(msg_handle.channel)
                             .or_default()
                             .push(parent_id);
+                    } else {
+                        info!("got fragment ack, but not all yet {msg_handle:?}");
                     }
                 } else {
-                    channel_list
-                        .get_mut(msg_handle.channel)
-                        .unwrap()
-                        .message_ack_received(msg_handle);
+                    // non-fragment messages directly map to an acked message
                     self.ack_inbox
                         .entry(msg_handle.channel)
                         .or_default()
@@ -180,34 +185,58 @@ impl MessageDispatcher {
     }
 }
 
+#[derive(Default, Clone, PartialEq)]
+enum FragAckStatus {
+    #[default]
+    Unknown,
+    Complete,
+    // lists remaining msg ids we need:
+    Partial(Vec<MessageId>),
+}
+
 /// tracks the unacked message ids assigned to fragments of a larger message id.
 /// they're removed as they are acked & once depleted, the original parent message id is acked.
-#[derive(Default)]
+
 pub struct SentFragMap {
-    m: HashMap<MessageId, Vec<u16>>,
+    m: SequenceBuffer<FragAckStatus>,
+    // m: HashMap<MessageId, Vec<u16>>,
+}
+impl Default for SentFragMap {
+    fn default() -> Self {
+        Self {
+            m: SequenceBuffer::with_capacity(1000),
+        }
+    }
 }
 impl SentFragMap {
     pub fn insert_fragmented_message(&mut self, id: MessageId, fragment_ids: Vec<u16>) {
-        let res = self.m.insert(id, fragment_ids);
-        assert!(
-            res.is_none(),
-            "why are we overwriting something in the fragmap?"
-        );
+        let _ = self.m.insert(FragAckStatus::Partial(fragment_ids), id);
+        // let res = self.m.insert(id, fragment_ids);
+        // assert!(
+        //     res.is_none(),
+        //     "why are we overwriting something in the fragmap?"
+        // );
     }
     /// returns true if parent message is whole/acked.
     pub fn ack_fragment_message(&mut self, parent_id: MessageId, fragment_id: MessageId) -> bool {
-        let ret = if let Some(v) = self.m.get_mut(&parent_id) {
-            v.retain(|id| *id != fragment_id);
-            v.is_empty()
-        } else {
-            false
+        let Some(entry) = self.m.get_mut(parent_id) else { return false; };
+        let ret = match entry {
+            FragAckStatus::Complete => {
+                info!("Message {parent_id} already completed arrived.");
+                false
+            }
+            FragAckStatus::Unknown => {
+                info!("Message {parent_id} unknown to frag map");
+                false
+            }
+            FragAckStatus::Partial(ref mut remaining) => {
+                remaining.retain(|id| *id != fragment_id);
+                remaining.is_empty()
+            }
         };
         if ret {
-            if let Some(_removed) = self.m.remove(&parent_id) {
-                info!("reassembly complete for {parent_id}");
-            } else {
-                warn!("No parent message id ({parent_id}) in the fragmap for completed msg");
-            }
+            let _ = self.m.insert(FragAckStatus::Complete, parent_id);
+            info!("Message fully acked, all fragments accounted for {parent_id}");
         }
         ret
     }

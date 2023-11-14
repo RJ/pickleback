@@ -64,6 +64,9 @@ impl<T: Eq + PartialEq + Clone> JitterPipe<T> {
             key_seq: 0.0,
         }
     }
+    pub fn config_mut(&mut self) -> &mut JitterPipeConfig {
+        &mut self.config
+    }
     pub fn next_key(&mut self) -> f32 {
         self.key_seq += 1.0;
         self.key_seq + self.config.jitter()

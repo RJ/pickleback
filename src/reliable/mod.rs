@@ -193,12 +193,17 @@ impl Endpoint {
         let (ack, ack_bits) = self.recv_buffer.ack_bits();
 
         let send_size = payload.len() + self.config.packet_header_size;
-        let sent = SentData::new(self.time, send_size); // time, acked, size.
+        let sent = SentData::new(self.time, send_size);
         self.sent_buffer.insert(sent, sequence)?;
 
         let header = PacketHeader::new(sequence, ack, ack_bits);
 
-        trace!("Sending packet {}", sequence);
+        info!(
+            ">>> Sending packet seq:{} ack:{} ack_bits:{:#0b}",
+            header.sequence(),
+            header.ack(),
+            header.ack_bits()
+        );
         let mut new_packet = BytesMut::with_capacity(header.size() + payload.len());
         header.write(&mut new_packet)?;
         new_packet.extend_from_slice(payload.as_ref());
@@ -215,11 +220,17 @@ impl Endpoint {
         self.counters.packets_received += 1;
 
         let header: PacketHeader = PacketHeader::parse(&mut packet)?;
+        // trace!(
+        //     "Receiving packet, t:{} seq:{} recv_buf.seq:{}",
+        //     self.time,
+        //     header.sequence(),
+        //     self.recv_buffer.sequence()
+        // );
         info!(
-            "Receiving packet, t:{} seq:{} recv_buf.seq:{}",
-            self.time,
+            "<<< Receiving packet seq:{} ack:{} ack_bits:{:#0b}",
             header.sequence(),
-            self.recv_buffer.sequence()
+            header.ack(),
+            header.ack_bits()
         );
         // if this packet sequence is out of range, reject as stale
         if !self.recv_buffer.check_sequence(header.sequence()) {
@@ -238,12 +249,15 @@ impl Endpoint {
             RecvData::new(self.time, self.config.packet_header_size + packet.len()),
             header.sequence(),
         )?;
+        // could maintain a drainable member vec of acked handles, and drain it
+        // and convert on the fly when draining at the packeteer level?
+        // would remove the vec allocation here each time.
 
+        // walk the ack bits and ack anything we haven't already acked, and collect the handles
         let mut ack_bits = header.ack_bits();
         let mut new_acks = Vec::new();
         // create ack field for last 32 msgs
         for i in 0..32 {
-            // TODO was this 33?
             if ack_bits & 1 != 0 {
                 let ack_sequence = header.ack().wrapping_sub(i);
 
@@ -261,6 +275,8 @@ impl Endpoint {
                                 self.rtt + ((rtt - self.rtt) * self.config.rtt_smoothing_factor);
                         }
                     }
+                    // } else {
+                    // warn!("Why are we getting an ack for a seq we don't have a send_data for?");
                 }
             }
             ack_bits >>= 1;
