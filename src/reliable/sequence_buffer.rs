@@ -1,3 +1,5 @@
+use rand::seq;
+
 use crate::ReliableError;
 // use log::*;
 use std::num::Wrapping;
@@ -98,18 +100,15 @@ where
             );
             return Err(ReliableError::SequenceBufferFull);
         }
-        log::info!("{} Inserting {sequence}..", self.type_name());
+        // log::info!("{} Inserting {sequence}..", self.type_name());
         // are we inserting with a gap in the range? ie new sequence we are inserting at
         // is more than 1 greater than the current max sequence?
-        // if Self::sequence_greater_than((Wrapping(sequence) + Wrapping(1)).0, self.sequence) {
         if Self::sequence_greater_than(sequence, self.sequence) {
-            // log::warn!(
-            //     "{} Removing range during insert of {sequence}, current sequence is {}",
-            //     self.type_name(),
-            //     self.sequence
-            // );
             let first_candidate = (Wrapping(self.sequence) + Wrapping(1)).0;
-            self.remove_range(first_candidate..sequence);
+            if first_candidate != sequence {
+                self.remove_range(first_candidate..sequence);
+            }
+
             self.sequence = sequence;
         }
 
@@ -124,10 +123,10 @@ where
     // TODO: THIS IS INCLUSIVE END
     pub fn remove_range(&mut self, range: std::ops::Range<u16>) {
         for i in range.clone() {
-            log::warn!("{} * Remove {i} ", self.type_name());
+            // log::warn!("{} * Remove {i} ", self.type_name());
             self.remove(i);
         }
-        log::warn!("{} * Remove {} ", self.type_name(), range.end);
+        // log::warn!("{} * Remove {} ", self.type_name(), range.end);
         self.remove(range.end);
     }
 

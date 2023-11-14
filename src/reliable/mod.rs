@@ -198,7 +198,7 @@ impl Endpoint {
 
         let header = PacketHeader::new(sequence, ack, ack_bits);
 
-        info!(
+        debug!(
             ">>> Sending packet seq:{} ack:{} ack_bits:{:#0b}",
             header.sequence(),
             header.ack(),
@@ -226,7 +226,7 @@ impl Endpoint {
         //     header.sequence(),
         //     self.recv_buffer.sequence()
         // );
-        info!(
+        debug!(
             "<<< Receiving packet seq:{} ack:{} ack_bits:{:#0b}",
             header.sequence(),
             header.ack(),

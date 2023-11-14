@@ -89,16 +89,15 @@ impl MessageDispatcher {
                     // fragment message
                     if self.sent_frag_map.ack_fragment_message(
                         parent_id,
-                        msg_handle
-                            .frag_index
-                            .expect("used to calc parent id, so must exist"),
+                        msg_handle.id(), // .frag_index
+                                         // .expect("used to calc parent id, so must exist"),
                     ) {
                         self.ack_inbox
                             .entry(msg_handle.channel)
                             .or_default()
                             .push(parent_id);
                     } else {
-                        info!("got fragment ack, but not all yet {msg_handle:?}");
+                        info!("got fragment ack for parent {parent_id}, but not all yet {msg_handle:?} ");
                     }
                 } else {
                     // non-fragment messages directly map to an acked message
@@ -231,11 +230,14 @@ impl SentFragMap {
             }
             FragAckStatus::Partial(ref mut remaining) => {
                 remaining.retain(|id| *id != fragment_id);
+                //  Remaining fragment indexs for parent 841, fragment_id=1 = [841, 842, 843, 844, 845, 846, 847, 848, 849, 850, 851, 852, 853]
+                // oops, am i using msg ids or fragment indexes for this?
+                info!("Remaining fragment indexs for parent {parent_id}, fragment_id={fragment_id} = {remaining:?}");
                 remaining.is_empty()
             }
         };
         if ret {
-            let _ = self.m.insert(FragAckStatus::Complete, parent_id);
+            self.m.insert(FragAckStatus::Complete, parent_id).unwrap();
             info!("Message fully acked, all fragments accounted for {parent_id}");
         }
         ret

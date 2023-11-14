@@ -383,8 +383,8 @@ mod tests {
         assert!(to_send[0].len() < 50);
     }
 
-    const NUM_TEST_MSGS: usize = 1;
-    const NUM_EXTRA_ITERATIONS: usize = 10;
+    const NUM_TEST_MSGS: usize = 100;
+    const NUM_EXTRA_ITERATIONS: usize = 20;
 
     // the reason this is failing is due to losses reliable messages get retransmitted before acks
     // arrived to stop it, so we get multiple deliveries. and no msg id to dedupe on at receiver.
@@ -407,7 +407,7 @@ mod tests {
             if let Some(msg) = test_msgs.get(i) {
                 let size = msg.len();
                 let msg_id = harness.server.send_message(channel, msg.clone());
-                info!("💌💌 Sending message {i}, size {size},  msg_id: {msg_id}");
+                info!("💌💌 Sending message {i}/{NUM_TEST_MSGS}, size {size},  msg_id: {msg_id}");
                 unacked_sent_msg_ids.push(msg_id);
             }
 
@@ -416,9 +416,12 @@ mod tests {
 
             let acked_ids = harness.collect_server_acks(channel);
             if !acked_ids.is_empty() {
-                info!("Server got ACKs: {acked_ids:?}");
+                unacked_sent_msg_ids.retain(|id| !acked_ids.contains(id));
+                info!(
+                    "👍 Server got ACKs: {acked_ids:?} still need: {} : {unacked_sent_msg_ids:?}",
+                    unacked_sent_msg_ids.len()
+                );
             }
-            unacked_sent_msg_ids.retain(|id| !acked_ids.contains(id));
 
             client_received_messages.extend(harness.client.drain_received_messages(channel));
         }
