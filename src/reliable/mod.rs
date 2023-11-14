@@ -1,20 +1,18 @@
 use log::*;
 
 use std::collections::VecDeque;
-use std::num::Wrapping;
-use std::time::Instant;
-
+// use std::num::Wrapping;
 mod sequence_buffer;
+
 pub use sequence_buffer::SequenceBuffer;
 
 mod error;
 pub use error::ReliableError;
 
 mod headers;
+use bytes::{Bytes, BytesMut};
 pub use headers::HeaderParser as Header;
 pub use headers::PacketHeader;
-
-use bytes::{Bytes, BytesMut};
 
 // pub const RELIABLE_MAX_PACKET_HEADER_BYTES: usize = 9;
 // pub const RELIABLE_FRAGMENT_HEADER_BYTES: usize = 5;
@@ -105,6 +103,7 @@ pub struct EndpointCounters {
     pub packets_received: u64,
     pub packets_acked: u64,
     pub packets_stale: u64,
+    pub packets_duplicate: u64,
     pub packets_invalid: u64,
     pub packets_too_large_to_send: u64,
     pub packets_too_large_to_receive: u64,
@@ -125,7 +124,7 @@ pub struct Endpoint {
     time: f64,
     rtt: f32,
     config: EndpointConfig,
-    sequence: i32,
+    sequence: u16,
     sent_buffer: SequenceBuffer<SentData>,
     recv_buffer: SequenceBuffer<RecvData>,
     counters: EndpointCounters,
@@ -157,6 +156,12 @@ impl Endpoint {
         self.outbox.drain(..)
     }
 
+    // used by tests
+    #[allow(dead_code)]
+    pub fn has_packets_to_send(&self) -> bool {
+        !self.outbox.is_empty()
+    }
+
     #[allow(unused)]
     pub fn config(&self) -> &EndpointConfig {
         &self.config
@@ -182,17 +187,16 @@ impl Endpoint {
             // return Err(ReliableError::ExceededMaxPacketSize);
         }
 
-        // Increment sequence
+        self.sequence = self.sequence.wrapping_add(1);
         let sequence = self.sequence;
-        self.sequence += 1;
 
         let (ack, ack_bits) = self.recv_buffer.ack_bits();
 
         let send_size = payload.len() + self.config.packet_header_size;
         let sent = SentData::new(self.time, send_size); // time, acked, size.
-        self.sent_buffer.insert(sent, sequence as u16)?;
+        self.sent_buffer.insert(sent, sequence)?;
 
-        let header = PacketHeader::new(sequence as u16, ack, ack_bits);
+        let header = PacketHeader::new(sequence, ack, ack_bits);
 
         trace!("Sending packet {}", sequence);
         let mut new_packet = BytesMut::with_capacity(header.size() + payload.len());
@@ -201,7 +205,7 @@ impl Endpoint {
         self.outbox.push_back(new_packet.freeze());
 
         self.counters.packets_sent += 1;
-        Ok(SentHandle(sequence as u16))
+        Ok(SentHandle(sequence))
     }
 
     /// Give me all the udp packets you read from the network.
@@ -211,13 +215,24 @@ impl Endpoint {
         self.counters.packets_received += 1;
 
         let header: PacketHeader = PacketHeader::parse(&mut packet)?;
-
+        info!(
+            "Receiving packet, t:{} seq:{} recv_buf.seq:{}",
+            self.time,
+            header.sequence(),
+            self.recv_buffer.sequence()
+        );
+        // if this packet sequence is out of range, reject as stale
         if !self.recv_buffer.check_sequence(header.sequence()) {
-            error!("Ignoring stale packet: {}", header.sequence());
+            log::warn!("Ignoring stale packet: {}", header.sequence());
             self.counters.packets_stale += 1;
             return Err(ReliableError::StalePacket);
         }
-        trace!("Processing packet...");
+        // if this packet was already received, reject as duplicate
+        if self.recv_buffer.exists(header.sequence()) {
+            log::warn!("Ignoring duplicate packet: {}", header.sequence());
+            self.counters.packets_duplicate += 1;
+            return Err(ReliableError::DuplicatePacket);
+        }
 
         self.recv_buffer.insert(
             RecvData::new(self.time, self.config.packet_header_size + packet.len()),
@@ -226,13 +241,14 @@ impl Endpoint {
 
         let mut ack_bits = header.ack_bits();
         let mut new_acks = Vec::new();
+        // create ack field for last 32 msgs
         for i in 0..32 {
+            // TODO was this 33?
             if ack_bits & 1 != 0 {
-                let ack_sequence: u16 = (Wrapping(header.ack()) - Wrapping(i)).0;
+                let ack_sequence = header.ack().wrapping_sub(i);
 
                 if let Some(sent_data) = self.sent_buffer.get_mut(ack_sequence) {
                     if !sent_data.acked {
-                        trace!("mark acked packet: {}", ack_sequence);
                         self.counters.packets_acked += 1;
                         sent_data.acked = true;
                         new_acks.push(SentHandle(ack_sequence));
@@ -262,12 +278,6 @@ impl Endpoint {
     }
 
     #[allow(unused)]
-    pub fn reset(&mut self) {
-        self.sequence = 0;
-        self.sent_buffer.reset();
-        self.recv_buffer.reset();
-    }
-    #[allow(unused)]
     pub fn counters(&self) -> &EndpointCounters {
         &self.counters
     }
@@ -279,14 +289,43 @@ mod tests {
 
     use super::*;
     // explicit import to override bevy
+
+    use crate::test_utils::*;
     use log::info;
+
+    #[test]
+    fn duplicates_dropped() {
+        init_logger();
+
+        let mut server = Endpoint::new(EndpointConfig::default(), 1.);
+        let mut client = Endpoint::new(EndpointConfig::default(), 1.);
+        let payload = Bytes::from_static(b"hello");
+        let SentHandle(seq) = server.send(payload.clone()).unwrap();
+
+        let to_send = server.drain_packets_to_send().collect::<Vec<_>>();
+        assert_eq!(to_send.len(), 1);
+
+        info!("Sending first copy of packet");
+        let rp = client.receive(to_send[0].clone()).unwrap();
+        assert_eq!(rp.handle.0, seq);
+        assert_eq!(rp.payload, payload);
+
+        // send dupe
+        info!("Sending second (dupe) copy of packet");
+        match client.receive(to_send[0].clone()) {
+            Err(ReliableError::DuplicatePacket) => {}
+            e => {
+                panic!("Should be dupe packet error, got: {:?}", e);
+            }
+        }
+    }
 
     const TEST_ACKS_NUM_ITERATIONS: usize = 200;
     #[test]
     fn acks() {
         crate::test_utils::init_logger();
 
-        let mut time = 100.0;
+        let time = 100.0;
         let test_data = Bytes::copy_from_slice(&[0x41; 24]); // "AAA..."
 
         let mut one = Endpoint::new(EndpointConfig::default(), time);
@@ -297,6 +336,7 @@ mod tests {
         let mut two_sent = Vec::new();
 
         for _ in 0..TEST_ACKS_NUM_ITERATIONS {
+            log::info!("tick..");
             // Send test packets
             let handle1 = one.send(test_data.clone()).unwrap();
             let handle2 = two.send(test_data.clone()).unwrap();
@@ -311,16 +351,17 @@ mod tests {
                 info!("two received: {rp:?}");
                 assert_eq!(test_data, rp.payload);
             });
+            assert!(!one.has_packets_to_send());
             two.drain_packets_to_send().for_each(|packet| {
                 info!("Sending two -> one: {packet:?}");
                 let rp = one.receive(packet).unwrap();
                 info!("one received: {rp:?}");
                 assert_eq!(test_data, rp.payload);
             });
+            assert!(!two.has_packets_to_send());
 
-            time += delta_time;
-            one.update(time);
-            two.update(time);
+            one.update(delta_time);
+            two.update(delta_time);
         }
     }
 
@@ -343,13 +384,14 @@ mod tests {
         }
 
         let (ack, ack_bits) = buffer.ack_bits();
-
+        println!("ack_bits = {ack_bits:#032b}");
         assert_eq!(ack, TEST_BUFFER_SIZE as u16);
         assert_eq!(ack_bits, 0xFFFFFFFF);
 
         ////
 
-        buffer.reset();
+        // buffer.reset();
+        buffer = SequenceBuffer::<TestData>::with_capacity(TEST_BUFFER_SIZE);
 
         for ack in [1, 5, 9, 11].iter() {
             buffer
@@ -363,12 +405,14 @@ mod tests {
         }
 
         let (ack, ack_bits) = buffer.ack_bits();
+        let expected_ack_bits = 1 | (1 << (11 - 9)) | (1 << (11 - 5)) | (1 << (11 - 1));
 
         assert_eq!(ack, 11);
-        assert_eq!(
-            ack_bits,
-            (1 | (1 << (11 - 9)) | (1 << (11 - 5)) | (1 << (11 - 1)))
-        );
+
+        println!("ack_bits = {ack_bits:#032b}");
+        println!("expected = {expected_ack_bits:#032b}");
+        // bits that should be set:
+        assert_eq!(ack_bits, expected_ack_bits);
     }
 
     #[test]
@@ -382,7 +426,7 @@ mod tests {
 
         let mut buffer = SequenceBuffer::<TestData>::with_capacity(TEST_BUFFER_SIZE);
 
-        assert_eq!(buffer.capacity(), TEST_BUFFER_SIZE);
+        assert_eq!(buffer.capacity(), TEST_BUFFER_SIZE as usize);
         assert_eq!(buffer.sequence(), 0);
 
         for i in 0..TEST_BUFFER_SIZE {
@@ -394,7 +438,7 @@ mod tests {
             buffer
                 .insert(TestData { sequence: i as u16 }, i as u16)
                 .unwrap();
-            assert_eq!(buffer.sequence(), i as u16 + 1);
+            assert_eq!(buffer.sequence(), i as u16);
 
             let r = buffer.get(i as u16);
             assert_eq!(r.unwrap().sequence, i as u16);

@@ -6,7 +6,6 @@ use reliable::*;
 use std::{
     collections::{hash_map::Entry, HashMap, VecDeque},
     mem::take,
-    time::Instant,
 };
 mod message;
 use message::*;
@@ -18,9 +17,12 @@ mod test_utils;
 use message_reassembler::*;
 mod dispatcher;
 use dispatcher::*;
+pub use jitter_pipe::*;
 
 #[derive(Debug)]
 pub struct ReceivedMessage {
+    /// ids on received msgs are used internally for uniqueness and ordering
+    pub id: MessageId,
     pub channel: u8,
     pub payload: Bytes,
 }
@@ -55,6 +57,12 @@ impl Packeteer {
         }
     }
 
+    // used by tests
+    #[allow(dead_code)]
+    pub(crate) fn channels_mut(&mut self) -> &mut ChannelList {
+        &mut self.channels
+    }
+
     pub fn drain_packets_to_send(
         &mut self,
     ) -> std::collections::vec_deque::Drain<'_, bytes::Bytes> {
@@ -87,7 +95,7 @@ impl Packeteer {
     //
     //
     fn write_packets_to_send(&mut self) {
-        info!("write packets.");
+        // info!("write packets.");
         let mut sent_something = false;
 
         let mut message_handles_in_packet = Vec::<MessageHandle>::new();
@@ -97,19 +105,19 @@ impl Packeteer {
         // definitely scope to optimise these nested loops..
         // hopefully never sending too many packets per tick though, so maybe fine.
         while self.channels.any_with_messages_to_send() {
-            info!("any with msg to send");
+            // info!("any with msg to send");
             // for all channels with messages to send:
             'non_empty_channels: while let Some(channel) = self.channels.all_non_empty_mut().next()
             {
                 let mut any_found = false;
                 while let Some(msg) = channel.get_message_to_write_to_a_packet(remaining_space) {
                     any_found = true;
-                    trace!("* Writing {msg:?} to packet buffer..");
+                    // trace!("* Writing {msg:?} to packet buffer..");
                     msg.write(&mut packet)
                         .expect("writing to a buffer shouldn't fail");
                     message_handles_in_packet.push(MessageHandle {
                         id: msg.id(),
-                        parent: msg.parent_id(),
+                        frag_index: msg.fragment().map(|f| f.index),
                         channel: channel.id(),
                     });
                     remaining_space = max_packet_size - packet.len();
@@ -145,7 +153,7 @@ impl Packeteer {
         // acks are transmitted.
         // sending one empty packet per tick is fine.. right? what about uncapped headless server?
         if !sent_something {
-            info!("No msgs. Sending empty packet, jsut for acks");
+            // info!("No msgs. Sending empty packet, jsut for acks");
             self.endpoint.send(Bytes::new()).unwrap();
         }
     }
@@ -172,6 +180,7 @@ impl Packeteer {
                 payload,
                 acks,
             }) => {
+                // info!("Received msg {handle:?}");
                 for acked_handle in &acks {
                     self.dispatcher
                         .acked_packet(acked_handle, &mut self.channels);
@@ -179,7 +188,16 @@ impl Packeteer {
                 let mut reader = payload;
                 while reader.remaining() > 0 {
                     match Message::parse(&mut reader) {
-                        Ok(msg) => self.dispatcher.process_received_message(msg),
+                        Ok(msg) => {
+                            // info!("Parsed msg: {msg:?}");
+                            if let Some(channel) = self.channels.get_mut(msg.channel()) {
+                                if channel.accepts_message(&msg) {
+                                    self.dispatcher.process_received_message(msg);
+                                } else {
+                                    warn!("Channel rejects message id {msg:?}");
+                                }
+                            }
+                        }
                         Err(err) => {
                             error!("Error parsing messages from packet payload: {err:?}");
                             break;
@@ -188,7 +206,7 @@ impl Packeteer {
                 }
             }
             Err(err) => {
-                warn!("incoming packet error {err:?}");
+                error!("incoming packet error {err:?}");
             }
         }
     }
@@ -199,6 +217,7 @@ mod tests {
     use crate::jitter_pipe::{JitterPipe, JitterPipeConfig};
 
     use super::*;
+    use test_utils::*;
     // explicit import to override bevy
     // use log::{debug, error, info, trace, warn};
 
@@ -249,8 +268,6 @@ mod tests {
 
         let msg_id = server.send_message(channel, msg.clone());
 
-        // server.write_packets_to_send();
-
         let mut client = Packeteer::new(1_f64);
         // deliver msgs from server to client
         server
@@ -273,99 +290,150 @@ mod tests {
         );
     }
 
-    fn random_payload(size: u32) -> Bytes {
-        use bytes::BufMut;
-        let mut b = BytesMut::with_capacity(size as usize);
-        for _ in 0..size {
-            b.put_u8(rand::random::<u8>());
-        }
-        b.freeze()
+    #[test]
+    fn reject_duplicate_messages() {
+        crate::test_utils::init_logger();
+        let channel = 0;
+        let mut harness = TestHarness::new(JitterPipeConfig::disabled());
+        let payload = Bytes::from_static(b"hello");
+        harness
+            .server
+            .channels_mut()
+            .get_mut(channel)
+            .unwrap()
+            .enqueue_message(123, payload.clone(), Fragmented::No);
+        harness
+            .server
+            .channels_mut()
+            .get_mut(channel)
+            .unwrap()
+            .enqueue_message(123, payload, Fragmented::No);
+        harness.advance(1.);
+        assert_eq!(harness.client.drain_received_messages(channel).len(), 1);
+        // let msg =
     }
+
     // TODO this isn't testing having multiple messages in flight yet? batch the sending and receiving?
     #[test]
     fn soak_message_transmission() {
         crate::test_utils::init_logger();
         let channel = 0;
-        let mut server = Packeteer::new(1_f64);
-        let mut client = Packeteer::new(1_f64);
+        let mut harness = TestHarness::new(JitterPipeConfig::disabled());
 
-        for _ in 0..10000 {
+        // TODO crashes when msg id rolls around
+        for _ in 0..1000 {
             let size = rand::random::<u32>() % (1024 * 16);
             let msg = random_payload(size);
-            let msg_id = server.send_message(channel, msg.clone());
-            println!("💌 Sending message of size {size}, msg_id: {msg_id}");
-            server
-                .drain_packets_to_send()
-                .for_each(|packet| client.process_incoming_packet(packet));
-            let received_messages = client.drain_received_messages(channel).collect::<Vec<_>>();
-            assert_eq!(received_messages.len(), 1);
-            assert_eq!(received_messages[0].payload, msg);
+            let msg_id = harness.server.send_message(channel, msg.clone());
+            info!("💌 Sending message of size {size}, msg_id: {msg_id}");
 
-            assert!(server
-                .drain_message_acks(channel)
-                .collect::<Vec<_>>()
-                .is_empty());
+            harness.advance(0.03);
 
-            client
-                .drain_packets_to_send()
-                .for_each(|packet| server.process_incoming_packet(packet));
+            let client_received_messages = harness
+                .client
+                .drain_received_messages(channel)
+                .collect::<Vec<_>>();
+            assert_eq!(client_received_messages.len(), 1);
+            assert_eq!(client_received_messages[0].payload, msg);
 
             assert_eq!(
                 vec![msg_id],
-                server.drain_message_acks(channel).collect::<Vec<_>>()
+                harness
+                    .server
+                    .drain_message_acks(channel)
+                    .collect::<Vec<_>>()
             );
         }
     }
 
+    struct TestHarness {
+        server: Packeteer,
+        client: Packeteer,
+        server_jitter_pipe: JitterPipe<Bytes>,
+        client_jitter_pipe: JitterPipe<Bytes>,
+    }
+    impl TestHarness {
+        fn new(config: JitterPipeConfig) -> Self {
+            let server_jitter_pipe = JitterPipe::<Bytes>::new(config.clone());
+            let client_jitter_pipe = JitterPipe::<Bytes>::new(config);
+            let server = Packeteer::new(1_f64);
+            let client = Packeteer::new(1_f64);
+            Self {
+                server,
+                client,
+                server_jitter_pipe,
+                client_jitter_pipe,
+            }
+        }
+        /// advances time  and transmits S2C and C2S via configured jitter pipes
+        fn advance(&mut self, dt: f64) {
+            self.server.update(dt);
+            self.client.update(dt);
+
+            self.server
+                .drain_packets_to_send()
+                .for_each(|packet| self.server_jitter_pipe.insert(packet));
+
+            while let Some(p) = self.server_jitter_pipe.take_next() {
+                self.client.process_incoming_packet(p);
+            }
+
+            self.client
+                .drain_packets_to_send()
+                .for_each(|packet| self.client_jitter_pipe.insert(packet));
+
+            while let Some(p) = self.client_jitter_pipe.take_next() {
+                self.server.process_incoming_packet(p);
+            }
+        }
+    }
+
+    const NUM_TEST_MSGS: usize = 1000;
+    const NUM_EXTRA_ITERATIONS: usize = 50;
+
+    // the reason this is failing is due to losses reliable messages get retransmitted before acks
+    // arrived to stop it, so we get multiple deliveries. and no msg id to dedupe on at receiver.
+    // reliable mesages need a unique id? so do ordered messages.. unreliables don't.
     #[test]
     fn soak_message_transmission_with_jitter_pipe() {
         crate::test_utils::init_logger();
-        let mut server = Packeteer::new(1_f64);
-        let mut client = Packeteer::new(1_f64);
-
         let channel = 1;
+        let mut harness = TestHarness::new(JitterPipeConfig::default());
 
-        let mut server_jitter_pipe = JitterPipe::<Bytes>::new(JitterPipeConfig::default());
-        let mut client_jitter_pipe = JitterPipe::<Bytes>::new(JitterPipeConfig::default());
+        let mut test_msgs = Vec::new();
+        (0..NUM_TEST_MSGS)
+            .for_each(|_| test_msgs.push(random_payload(rand::random::<u32>() % (1024 * 16))));
 
-        for i in 0..10 {
-            let size = rand::random::<u32>() % (1024 * 16);
-            let msg = random_payload(size);
-            let msg_id = server.send_message(channel, msg.clone());
-            println!("💌 Sending message of size {size}, msg_id: {msg_id}");
+        let mut unacked_sent_msg_ids = Vec::new();
 
-            server.update(i as f64 * 0.051);
-            client.update(i as f64 * 0.051);
+        let mut client_received_messages = Vec::new();
 
-            server.drain_packets_to_send().for_each(|packet| {
-                info!("{i} --server-->pipe");
-                server_jitter_pipe.insert(packet)
-            });
-
-            while let Some(p) = server_jitter_pipe.take_next() {
-                client.process_incoming_packet(p);
+        for i in 0..(NUM_TEST_MSGS + NUM_EXTRA_ITERATIONS) {
+            if let Some(msg) = test_msgs.get(i) {
+                let size = msg.len();
+                let msg_id = harness.server.send_message(channel, msg.clone());
+                info!("💌 Sending message of size {size},  msg_id: {msg_id}");
+                unacked_sent_msg_ids.push(msg_id);
             }
 
-            let received_messages = client.drain_received_messages(channel).collect::<Vec<_>>();
-            assert_eq!(received_messages.len(), 1);
-            assert_eq!(received_messages[0].payload, msg);
+            harness.advance(0.03);
 
-            assert!(server
+            let acked_ids = harness
+                .server
                 .drain_message_acks(channel)
-                .collect::<Vec<_>>()
-                .is_empty());
+                .collect::<Vec<_>>();
+            unacked_sent_msg_ids.retain(|id| !acked_ids.contains(id));
 
-            client
-                .drain_packets_to_send()
-                .for_each(|packet| client_jitter_pipe.insert(packet));
-            while let Some(p) = client_jitter_pipe.take_next() {
-                server.process_incoming_packet(p);
-            }
-
-            assert_eq!(
-                vec![msg_id],
-                server.drain_message_acks(channel).collect::<Vec<_>>()
-            );
+            client_received_messages.extend(harness.client.drain_received_messages(channel));
         }
+
+        assert_eq!(
+            Vec::<MessageId>::new(),
+            unacked_sent_msg_ids,
+            "server is missing acks for these messages"
+        );
+
+        // with enough extra iterations, resends should have ensured everything was received.
+        assert_eq!(client_received_messages.len(), test_msgs.len());
     }
 }

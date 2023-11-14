@@ -6,6 +6,7 @@ use std::{cmp::Ordering, collections::BinaryHeap};
 /// for each packet sent. Jitter modifies the sort key by +/- . So Jitter under 0.5 will never
 /// cause packets to reorder, since packets with keys 1,2 with jitter of 0.4 will at worse become:
 /// 1.4, 1.6 but worst case jitter of 0.6 could be: 1.6, 1.4 which would cause a reorder.
+#[derive(Clone)]
 pub struct JitterPipeConfig {
     pub enabled: bool,
     pub drop_chance: f32,
@@ -86,6 +87,9 @@ impl<T: Eq + PartialEq + Clone> JitterPipe<T> {
             return Some(item);
         }
         None
+    }
+    pub fn is_empty(&self) -> bool {
+        self.heap.is_empty()
     }
 }
 

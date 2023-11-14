@@ -118,20 +118,14 @@ let msg_id = dispatcher.add_message_to_channel(&mut channel, payload);
 let messages_received: Vec<Message> = dispatcher.process_message(&mut channel, message);
 // (empty if a fragment of incomplete msg)
 
-
-
 ```
 
 
+# Notes
 
+each message needs an id on the wire, since that's the only way we can dedupe on receiving end?
+then we prevent duplicated  msgs being received in any channel (and can reorder, drop stale.)
 
-
-
-
-
-
-## Message Layer
-
-Coalesces multiple messages into a packets, and maps packet seqnos to message ids, for acking of messages.
+it's a problem when we resend a msg because ack is late arriving - it arrives twice.
 
 

@@ -31,6 +31,20 @@ where
         }
     }
 
+    // #[allow(unused)]
+    // pub fn reset(&mut self) {
+    //     self.sequence = 0;
+    //     self.entries.clear();
+    //     for e in &mut self.entry_sequences {
+    //         *e = 0;
+    //     }
+    // }
+
+    pub fn exists(&self, sequence: u16) -> bool {
+        let index = self.index(sequence);
+        self.entry_sequences[index] == u32::from(sequence)
+    }
+
     pub fn get(&self, sequence: u16) -> Option<&T> {
         let index = self.index(sequence);
         if self.entry_sequences[index] != u32::from(sequence) {
@@ -54,20 +68,23 @@ where
             sequence,
             (Wrapping(self.sequence) - Wrapping(self.len() as u16)).0,
         ) {
+            // too old to insert. rename error to "SequnceTooOld"?
             return Err(ReliableError::SequenceBufferFull);
         }
-        if Self::sequence_greater_than((Wrapping(sequence) + Wrapping(1)).0, self.sequence) {
-            self.remove_range(self.sequence..sequence);
-
-            self.sequence = (Wrapping(sequence) + Wrapping(1)).0;
+        // are we inserting with a gap in the range? ie new sequence we are inserting at
+        // is more than 1 greater than the current max sequence?
+        // if Self::sequence_greater_than((Wrapping(sequence) + Wrapping(1)).0, self.sequence) {
+        let next_natural_sequence = (Wrapping(self.sequence) + Wrapping(1)).0;
+        if Self::sequence_greater_than(sequence, next_natural_sequence) {
+            self.remove_range(next_natural_sequence..sequence);
         }
 
-        let index = self.index(sequence);
+        self.sequence = sequence;
+
+        let index = self.index(self.sequence);
 
         self.entries[index] = data;
-        self.entry_sequences[index] = u32::from(sequence);
-
-        self.sequence = (Wrapping(sequence) + Wrapping(1)).0;
+        self.entry_sequences[index] = u32::from(self.sequence);
 
         Ok(&mut self.entries[index])
     }
@@ -85,14 +102,6 @@ where
         let index = self.index(sequence);
         self.entries[index] = T::default();
         self.entry_sequences[index] = 0xFFFF_FFFF;
-    }
-
-    #[allow(unused)]
-    pub fn reset(&mut self) {
-        self.sequence = 0;
-        for e in &mut self.entry_sequences {
-            *e = 0;
-        }
     }
 
     pub fn sequence(&self) -> u16 {
@@ -114,20 +123,18 @@ where
     }
 
     pub fn ack_bits(&self) -> (u16, u32) {
-        let ack = (Wrapping(self.sequence) - Wrapping(1)).0;
+        let ack = self.sequence;
         let mut ack_bits: u32 = 0;
         let mut mask: u32 = 1;
-
         for i in 0..33 {
             let sequence = (Wrapping(ack) - Wrapping(i as u16)).0;
-
-            if self.get(sequence).is_some() {
+            if self.exists(sequence) {
                 ack_bits |= mask;
             }
 
             mask <<= 1;
         }
-        (ack, ack_bits)
+        (self.sequence, ack_bits)
     }
 
     #[inline]
@@ -146,6 +153,7 @@ where
 
     #[inline]
     pub fn check_sequence(&self, sequence: u16) -> bool {
+        // Self::sequence_greater_than(sequence, self.sequence)
         Self::sequence_greater_than(
             sequence,
             (Wrapping(self.sequence()) - Wrapping(self.len() as u16)).0,

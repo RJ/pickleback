@@ -3,9 +3,11 @@ pub enum ReliableError {
     Io(std::io::Error),
     ExceededMaxPacketSize,
     SequenceBufferFull,
+    // SequenceTooOld,
     PacketTooSmall,
     InvalidPacket,
     StalePacket,
+    DuplicatePacket,
     InvalidMessage,
 }
 
