@@ -113,7 +113,7 @@ impl MessageDispatcher {
     pub(crate) fn add_message_to_channel(
         &mut self,
         channel: &mut Box<dyn Channel>,
-        payload: Bytes,
+        payload: &[u8],
     ) -> MessageId {
         if payload.len() <= 1024 {
             self.add_small_message_to_channel(channel, payload)
@@ -125,7 +125,7 @@ impl MessageDispatcher {
     fn add_small_message_to_channel(
         &mut self,
         channel: &mut Box<dyn Channel>,
-        payload: Bytes,
+        payload: &[u8],
     ) -> MessageId {
         assert!(payload.len() <= 1024);
         let id = self.next_message_id();
@@ -136,30 +136,29 @@ impl MessageDispatcher {
     fn add_large_message_to_channel(
         &mut self,
         channel: &mut Box<dyn Channel>,
-        mut payload: Bytes,
+        mut payload: &[u8],
     ) -> MessageId {
         assert!(payload.len() > 1024);
         // all fragments use the same message id.
-        let payload_len = payload.len();
+        let full_payload_size = payload.len();
         // split into multiple messages.
         // each fragment has a unique message id, but due to sequential allocation you can always
         // calculate the id of the first fragment - ie the one that's returned to the user for acking -
         // by taking the fragment id and subtracting the index.
         //
         // ie the message.id of the fragment with index 0 is the parent ackable message id.
-        let remainder = if payload_len % 1024 > 0 { 1 } else { 0 };
-        let num_fragments = ((payload_len / 1024) + remainder) as u16;
+        let remainder = if full_payload_size % 1024 > 0 { 1 } else { 0 };
+        let num_fragments = ((full_payload_size / 1024) + remainder) as u16;
         let mut frag_ids = Vec::new();
         // id of first frag message is the parent id for the group
         let mut id = self.next_message_id();
         let parent_id = id;
         for index in 0..num_fragments {
             let payload_size = if index == num_fragments - 1 {
-                payload_len as u16 - (num_fragments - 1) * 1024
+                full_payload_size as u16 - (num_fragments - 1) * 1024
             } else {
                 1024_u16
             };
-            let frag_payload = payload.split_to(payload_size as usize);
             if index > 0 {
                 id = self.next_message_id();
             }
@@ -170,6 +169,9 @@ impl MessageDispatcher {
                 num_fragments,
                 parent_id,
             };
+            let start = usize::from(index as usize * 1024);
+            let end = start + payload_size as usize;
+            let frag_payload = &payload[start..end];
             channel.enqueue_message(id, frag_payload, Fragmented::Yes(fragment));
         }
         self.sent_frag_map
@@ -218,7 +220,9 @@ impl SentFragMap {
     }
     /// returns true if parent message is whole/acked.
     pub fn ack_fragment_message(&mut self, parent_id: MessageId, fragment_id: MessageId) -> bool {
-        let Some(entry) = self.m.get_mut(parent_id) else { return false; };
+        let Some(entry) = self.m.get_mut(parent_id) else {
+            return false;
+        };
         let ret = match entry {
             FragAckStatus::Complete => {
                 info!("Message {parent_id} already completed arrived.");

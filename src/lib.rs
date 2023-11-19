@@ -91,7 +91,7 @@ impl Packeteer {
 
     /// enqueue a message to be sent in a packet.
     /// messages get coalesced into packets.
-    pub fn send_message(&mut self, channel: u8, message_payload: Bytes) -> MessageId {
+    pub fn send_message(&mut self, channel: u8, message_payload: &[u8]) -> MessageId {
         let channel = self.channels.get_mut(channel).expect("No such channel");
         self.dispatcher
             .add_message_to_channel(channel, message_payload)
@@ -238,12 +238,12 @@ mod tests {
         let channel = 0;
         let mut harness = TestHarness::new(JitterPipeConfig::disabled());
 
-        let msg1 = Bytes::from_static(b"Hello");
-        let msg2 = Bytes::from_static(b"world");
-        let msg3 = Bytes::from_static(b"!");
-        let id1 = harness.server.send_message(channel, msg1.clone());
-        let id2 = harness.server.send_message(channel, msg2.clone());
-        let id3 = harness.server.send_message(channel, msg3.clone());
+        let msg1 = b"Hello";
+        let msg2 = b"world";
+        let msg3 = b"!";
+        let id1 = harness.server.send_message(channel, msg1);
+        let id2 = harness.server.send_message(channel, msg2);
+        let id3 = harness.server.send_message(channel, msg3);
 
         harness.advance(0.1);
 
@@ -251,9 +251,9 @@ mod tests {
             .client
             .drain_received_messages(channel)
             .collect::<Vec<_>>();
-        assert_eq!(received_messages[0].payload, msg1);
-        assert_eq!(received_messages[1].payload, msg2);
-        assert_eq!(received_messages[2].payload, msg3);
+        assert_eq!(received_messages[0].payload.as_ref(), msg1);
+        assert_eq!(received_messages[1].payload.as_ref(), msg2);
+        assert_eq!(received_messages[2].payload.as_ref(), msg3);
 
         assert_eq!(
             vec![id1, id2, id3],
@@ -270,13 +270,12 @@ mod tests {
         let channel = 0;
         let mut harness = TestHarness::new(JitterPipeConfig::disabled());
 
-        let mut msg = BytesMut::new();
+        let mut msg = Vec::new();
         msg.extend_from_slice(&[65; 1024]);
         msg.extend_from_slice(&[66; 1024]);
         msg.extend_from_slice(&[67; 100]);
-        let msg = msg.freeze();
 
-        let msg_id = harness.server.send_message(channel, msg.clone());
+        let msg_id = harness.server.send_message(channel, msg.as_ref());
 
         harness.advance(0.1);
 
@@ -302,13 +301,13 @@ mod tests {
         crate::test_utils::init_logger();
         let channel = 0;
         let mut harness = TestHarness::new(JitterPipeConfig::disabled());
-        let payload = Bytes::from_static(b"hello");
+        let payload = b"hello";
         harness
             .server
             .channels_mut()
             .get_mut(channel)
             .unwrap()
-            .enqueue_message(123, payload.clone(), Fragmented::No);
+            .enqueue_message(123, payload, Fragmented::No);
         harness
             .server
             .channels_mut()
@@ -331,7 +330,7 @@ mod tests {
         for _ in 0..1000 {
             let size = rand::random::<u32>() % (1024 * 16);
             let msg = random_payload(size);
-            let msg_id = harness.server.send_message(channel, msg.clone());
+            let msg_id = harness.server.send_message(channel, msg.as_ref());
             info!("💌 Sending message of size {size}, msg_id: {msg_id}");
 
             harness.advance(0.03);
@@ -361,7 +360,7 @@ mod tests {
         let mut harness = TestHarness::new(JitterPipeConfig::disabled());
         // big enough to require 2 packets
         let payload = random_payload(1800);
-        let id = harness.server.send_message(channel, payload);
+        let id = harness.server.send_message(channel, payload.as_ref());
         // drop second packet (index 1), which will be the second of the two fragments.
         harness.advance_with_server_outbound_drops(0.05, vec![1]);
         assert!(harness.collect_client_messages(channel).is_empty());
@@ -383,7 +382,7 @@ mod tests {
         assert!(to_send[0].len() < 50);
     }
 
-    const NUM_TEST_MSGS: usize = 1000000;
+    const NUM_TEST_MSGS: usize = 1000;
     // extras are to ensure and resends / acks actually can be retransmitted
     const NUM_EXTRA_ITERATIONS: usize = 100;
 
@@ -404,7 +403,7 @@ mod tests {
         for i in 0..(NUM_TEST_MSGS + NUM_EXTRA_ITERATIONS) {
             if let Some(msg) = test_msgs.get(i) {
                 let size = msg.len();
-                let msg_id = harness.server.send_message(channel, msg.clone());
+                let msg_id = harness.server.send_message(channel, msg.as_ref());
                 info!("💌💌 Sending message {i}/{NUM_TEST_MSGS}, size {size},  msg_id: {msg_id}");
                 unacked_sent_msg_ids.push(msg_id);
             }

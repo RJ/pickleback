@@ -99,7 +99,7 @@ pub(crate) trait Channel {
     fn update(&mut self, time: f64);
     fn any_ready_to_send(&self) -> bool;
     /// enqueue a message to be sent in an outbound packet
-    fn enqueue_message(&mut self, id: MessageId, payload: Bytes, fragmented: message::Fragmented);
+    fn enqueue_message(&mut self, id: MessageId, payload: &[u8], fragmented: message::Fragmented);
     /// called when a message has been acked by the packet layer
     fn message_ack_received(&mut self, msg_handle: &MessageHandle);
     /// get message ready to be coalesced into an outbound packet
@@ -148,8 +148,8 @@ impl Channel for UnreliableChannel {
             }
         }
     }
-    fn enqueue_message(&mut self, id: MessageId, payload: Bytes, fragmented: message::Fragmented) {
-        let msg = Message::new(id, self.id(), payload, fragmented);
+    fn enqueue_message(&mut self, id: MessageId, payload: &[u8], fragmented: message::Fragmented) {
+        let msg = Message::new(id, self.id(), Bytes::copy_from_slice(payload), fragmented);
         info!(">>>>> unreliable chan enq msg: {msg:?}");
         self.q.push_back(msg);
     }
@@ -245,8 +245,8 @@ impl Channel for ReliableChannel {
             }
         }
     }
-    fn enqueue_message(&mut self, id: MessageId, payload: Bytes, fragmented: message::Fragmented) {
-        let msg = Message::new(id, self.id(), payload, fragmented);
+    fn enqueue_message(&mut self, id: MessageId, payload: &[u8], fragmented: message::Fragmented) {
+        let msg = Message::new(id, self.id(), Bytes::copy_from_slice(payload), fragmented);
         self.q.push_back(ResendableMessage::new(msg));
     }
     fn any_ready_to_send(&self) -> bool {
@@ -291,7 +291,7 @@ mod tests {
     fn unreliable_channel() {
         crate::test_utils::init_logger();
         let mut channel = UnreliableChannel::new(0, 1.0);
-        let payload = Bytes::from_static(b"hello");
+        let payload = b"hello";
         channel.enqueue_message(0, payload, Fragmented::No);
         assert!(channel.any_ready_to_send());
         assert!(channel.get_message_to_write_to_a_packet(999999).is_some());
@@ -304,7 +304,7 @@ mod tests {
         crate::test_utils::init_logger();
         let channel_id = 0;
         let mut channel = ReliableChannel::new(channel_id, 1.0);
-        let payload = Bytes::from_static(b"hello");
+        let payload = b"hello";
         let message_id = 123;
         channel.enqueue_message(message_id, payload, Fragmented::No);
         assert!(channel.any_ready_to_send());
