@@ -31,14 +31,18 @@ impl MessageDispatcher {
     // pass in msgs parsed from received network packets.
     pub(crate) fn process_received_message(&mut self, msg: Message) {
         info!("Dispatcher::process_received_message: {msg:?}");
-        // in case it's a fragment, do reassembly.
-        // this just yields a ReceivedMessage instantly for non-fragments:
-        if let Some(received_msg) = self.message_reassembler.add_fragment(&msg) {
-            info!("✅ Adding message to inbox {received_msg:?}",);
+        let received_msg = if msg.fragment().is_none() {
+            Some(ReceivedMessage::new_single(msg))
+        } else {
+            self.message_reassembler.add_fragment(msg)
+        };
+
+        if let Some(msg) = received_msg {
+            info!("✅ Adding msg to inbox");
             self.message_inbox
-                .entry(received_msg.channel)
+                .entry(msg.channel())
                 .or_default()
-                .push(received_msg);
+                .push(msg);
         }
     }
 

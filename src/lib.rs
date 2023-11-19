@@ -2,7 +2,7 @@
 use bytes::{Buf, Bytes, BytesMut};
 use log::*;
 use std::{
-    collections::{hash_map::Entry, HashMap, VecDeque},
+    collections::{HashMap, VecDeque},
     mem::take,
 };
 mod channel;
@@ -13,6 +13,7 @@ mod jitter_pipe;
 mod message;
 mod message_reassembler;
 mod packet;
+mod received_message;
 mod sequence_buffer;
 mod test_utils;
 mod tracking;
@@ -25,6 +26,7 @@ use jitter_pipe::*;
 use message::*;
 use message_reassembler::*;
 use packet::*;
+use received_message::*;
 use sequence_buffer::*;
 use tracking::*;
 
@@ -32,27 +34,9 @@ pub mod prelude {
     pub use super::config::PacketeerConfig;
     pub use super::error::PacketeerError;
     pub use super::jitter_pipe::JitterPipeConfig;
+    pub use super::received_message::ReceivedMessage;
     pub use super::tracking::PacketeerStats;
     pub use super::Packeteer;
-    pub use super::ReceivedMessage;
-}
-
-pub struct ReceivedMessage {
-    pub id: MessageId,
-    pub channel: u8,
-    pub payload: Bytes,
-}
-
-impl std::fmt::Debug for ReceivedMessage {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "ReceivedMessage{{id: {}, channel: {}, payload_len: {}}}",
-            self.id,
-            self.channel,
-            self.payload.len()
-        )
-    }
 }
 
 /// returned from send - contains packet seqno
@@ -377,8 +361,9 @@ mod tests {
         assert!(client.process_incoming_packet(to_send[0].clone()).is_ok());
 
         let rec = client.drain_received_messages(0).next().unwrap();
-        assert_eq!(rec.channel, 0);
-        assert_eq!(rec.payload, payload);
+        assert_eq!(rec.channel(), 0);
+
+        assert_eq!(rec.payload_to_owned().as_slice(), payload.as_ref());
 
         // send dupe
         info!("Sending second (dupe) copy of packet");
@@ -420,8 +405,8 @@ mod tests {
                         .drain_received_messages(0)
                         .next()
                         .unwrap()
-                        .payload
-                        .as_ref()
+                        .payload_to_owned()
+                        .as_slice()
                 );
             });
             assert!(!server.has_packets_to_send());
@@ -433,8 +418,8 @@ mod tests {
                         .drain_received_messages(0)
                         .next()
                         .unwrap()
-                        .payload
-                        .as_ref()
+                        .payload_to_owned()
+                        .as_slice()
                 );
             });
             assert!(!client.has_packets_to_send());
@@ -580,9 +565,9 @@ mod tests {
             .client
             .drain_received_messages(channel)
             .collect::<Vec<_>>();
-        assert_eq!(received_messages[0].payload.as_ref(), msg1);
-        assert_eq!(received_messages[1].payload.as_ref(), msg2);
-        assert_eq!(received_messages[2].payload.as_ref(), msg3);
+        assert_eq!(received_messages[0].payload_to_owned().as_slice(), msg1);
+        assert_eq!(received_messages[1].payload_to_owned().as_slice(), msg2);
+        assert_eq!(received_messages[2].payload_to_owned().as_slice(), msg3);
 
         assert_eq!(
             vec![id1, id2, id3],
@@ -613,7 +598,7 @@ mod tests {
             .drain_received_messages(channel)
             .collect::<Vec<_>>();
         assert_eq!(received_messages.len(), 1);
-        assert_eq!(received_messages[0].payload, msg);
+        assert_eq!(received_messages[0].payload_to_owned().as_slice(), msg);
 
         // client should have sent acks back to server
         assert_eq!(
@@ -668,7 +653,10 @@ mod tests {
                 .drain_received_messages(channel)
                 .collect::<Vec<_>>();
             assert_eq!(client_received_messages.len(), 1);
-            assert_eq!(client_received_messages[0].payload, msg);
+            assert_eq!(
+                client_received_messages[0].payload_to_owned().as_slice(),
+                msg
+            );
 
             assert_eq!(
                 vec![msg_id],
