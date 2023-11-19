@@ -1,5 +1,5 @@
 #[derive(Clone)]
-pub struct EndpointConfig {
+pub struct PacketeerConfig {
     pub max_payload_size: usize,
     pub max_packet_size: usize,
     pub sent_packets_buffer_size: usize,
@@ -10,7 +10,7 @@ pub struct EndpointConfig {
     pub packet_header_size: usize,
 }
 
-impl Default for EndpointConfig {
+impl Default for PacketeerConfig {
     fn default() -> Self {
         Self {
             max_payload_size: 1024,

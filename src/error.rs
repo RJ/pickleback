@@ -1,5 +1,5 @@
 #[derive(Debug)]
-pub enum ReliableError {
+pub enum PacketeerError {
     Io(std::io::Error),
     ExceededMaxPacketSize,
     SequenceBufferFull,
@@ -11,14 +11,14 @@ pub enum ReliableError {
     InvalidMessage,
 }
 
-impl std::fmt::Display for ReliableError {
+impl std::fmt::Display for PacketeerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "invalid first item to double")
     }
 }
 
 // This is important for other errors to wrap this one.
-impl std::error::Error for ReliableError {
+impl std::error::Error for PacketeerError {
     fn description(&self) -> &str {
         "invalid first item to double"
     }
@@ -28,8 +28,8 @@ impl std::error::Error for ReliableError {
     }
 }
 
-impl From<std::io::Error> for ReliableError {
+impl From<std::io::Error> for PacketeerError {
     fn from(err: std::io::Error) -> Self {
-        ReliableError::Io(err)
+        PacketeerError::Io(err)
     }
 }

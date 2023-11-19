@@ -1,3 +1,4 @@
+///
 use bytes::{Buf, Bytes, BytesMut};
 use log::*;
 use std::{
@@ -28,8 +29,8 @@ use sequence_buffer::*;
 use tracking::*;
 
 pub mod prelude {
-    pub use super::config::EndpointConfig;
-    pub use super::error::ReliableError;
+    pub use super::config::PacketeerConfig;
+    pub use super::error::PacketeerError;
     pub use super::jitter_pipe::JitterPipeConfig;
     pub use super::tracking::PacketeerStats;
     pub use super::Packeteer;
@@ -61,7 +62,7 @@ pub struct SentHandle(u16);
 pub struct Packeteer {
     time: f64,
     rtt: f32,
-    config: EndpointConfig,
+    config: PacketeerConfig,
     sequence: u16,
     dispatcher: MessageDispatcher,
     channels: ChannelList,
@@ -73,14 +74,14 @@ pub struct Packeteer {
 
 impl Default for Packeteer {
     fn default() -> Self {
-        Self::new(EndpointConfig::default(), 1.0)
+        Self::new(PacketeerConfig::default(), 1.0)
     }
 }
 
 /// Represents one end of a datagram stream between two peers, one of which is the server.
 ///
 impl Packeteer {
-    pub fn new(config: EndpointConfig, time: f64) -> Self {
+    pub fn new(config: PacketeerConfig, time: f64) -> Self {
         let mut channels = ChannelList::default();
         channels.put(Box::new(UnreliableChannel::new(0, time)));
         channels.put(Box::new(ReliableChannel::new(1, time)));
@@ -121,7 +122,7 @@ impl Packeteer {
     }
 
     #[allow(unused)]
-    pub fn config(&self) -> &EndpointConfig {
+    pub fn config(&self) -> &PacketeerConfig {
         &self.config
     }
 
@@ -172,7 +173,7 @@ impl Packeteer {
         &mut self,
         sequence: u16,
         packet_len: usize,
-    ) -> Result<(), ReliableError> {
+    ) -> Result<(), PacketeerError> {
         let send_size = packet_len + self.config.packet_header_size;
         let sent = SentData::new(self.time, send_size);
         self.sent_buffer.insert(sent, sequence)?;
@@ -187,7 +188,7 @@ impl Packeteer {
     // and reliables need to stick around even longer..
     //
     //
-    fn write_packets_to_send(&mut self) -> Result<(), ReliableError> {
+    fn write_packets_to_send(&mut self) -> Result<(), PacketeerError> {
         // info!("write packets.");
         let mut sent_something = false;
 
@@ -261,7 +262,7 @@ impl Packeteer {
     /// "Sending" a packet involves writing a record into the sent buffer,
     /// incrementing the stats counters, and placing the packet into the outbox,
     /// so the consumer code can fetch and dispatch it via whatever means they like.
-    fn send_packet(&mut self, packet: Bytes) -> Result<(), ReliableError> {
+    fn send_packet(&mut self, packet: Bytes) -> Result<(), PacketeerError> {
         let send_size = packet.len() + self.config.packet_header_size;
         self.sent_buffer
             .insert(SentData::new(self.time, send_size), self.sequence)?;
@@ -285,7 +286,7 @@ impl Packeteer {
     /// parse out the messages for returning.
     ///
     ///  TODO make this take a &[u8] too?
-    pub fn process_incoming_packet(&mut self, mut packet: Bytes) -> Result<(), ReliableError> {
+    pub fn process_incoming_packet(&mut self, mut packet: Bytes) -> Result<(), PacketeerError> {
         self.counters.packets_received += 1;
         let header: PacketHeader = PacketHeader::parse(&mut packet)?;
         debug!(
@@ -298,13 +299,13 @@ impl Packeteer {
         if !self.recv_buffer.check_sequence(header.sequence()) {
             log::warn!("Ignoring stale packet: {}", header.sequence());
             self.counters.packets_stale += 1;
-            return Err(ReliableError::StalePacket);
+            return Err(PacketeerError::StalePacket);
         }
         // if this packet was already received, reject as duplicate
         if self.recv_buffer.exists(header.sequence()) {
             log::warn!("Ignoring duplicate packet: {}", header.sequence());
             self.counters.packets_duplicate += 1;
-            return Err(ReliableError::DuplicatePacket);
+            return Err(PacketeerError::DuplicatePacket);
         }
         self.recv_buffer.insert(
             RecvData::new(self.time, self.config.packet_header_size + packet.len()),
@@ -393,7 +394,7 @@ mod tests {
         // send dupe
         info!("Sending second (dupe) copy of packet");
         match client.process_incoming_packet(to_send[0].clone()) {
-            Err(ReliableError::DuplicatePacket) => {}
+            Err(PacketeerError::DuplicatePacket) => {}
             e => {
                 panic!("Should be dupe packet error, got: {:?}", e);
             }
@@ -517,7 +518,7 @@ mod tests {
 
         let mut buffer = SequenceBuffer::<TestData>::with_capacity(TEST_BUFFER_SIZE);
 
-        assert_eq!(buffer.capacity(), TEST_BUFFER_SIZE as usize);
+        assert_eq!(buffer.capacity(), TEST_BUFFER_SIZE);
         assert_eq!(buffer.sequence(), 0);
 
         for i in 0..TEST_BUFFER_SIZE {

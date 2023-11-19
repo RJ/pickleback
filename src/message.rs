@@ -1,4 +1,49 @@
-use crate::ReliableError;
+///
+/// ### Message header
+///
+/// Packet payloads consist of multiple Messages.
+/// Messages are prefixed by a message header.
+///
+/// ### Small flag
+///
+/// * For non-frag msgs, payload size is a u8 (256b msgs)
+/// * for frags, number of fragments, and also fragment id, uses u8 (256kB payloads)
+///
+/// ### Large flag
+/// * For frag msgs, payload size uses 2 bytes, a u16 (can fill packet, up to ~1024B)
+/// * for frags, number of fragments, and also fragment id, uses u16 (65,536 * 1kB = loads)
+///
+///
+/// `MessagePrefixByte`
+/// | bits       |          | description                            |
+/// | ---------- | -------- | -------------------------------------- |
+/// | `-------X` | `<< 0`   | X = 0 non-fragmented. X = 1 fragmented |
+/// | `------X-` | `<< 1`   | X = 0 small flag, X = 1 large flag     |
+/// | `XXXXXX--` | `<< 2-7` | channel number 2^6 = 64 channels       |
+///
+/// ## Non-fragmented Message
+///
+/// | bytes  | type       | description                                                                     |
+/// | ------ | ---------- | ------------------------------------------------------------------------------- |
+/// | 1      | `u8`       | `MessagePrefixByte`                                                             |
+/// | 1 or 2 | `u8`/`u16` | Payload Length, 1 or 2 bytes, depending on `MessagePrefixByte` small/large flag |
+/// | ...    | Payload    |                                                                                 |
+///
+/// ## Fragmented Message
+///
+/// need to take care with multiple frag groups in flight - ensure no overlap or we get old frags..
+/// also can probably pack frag group, id, num frags more concisely.
+///
+/// | bytes  | type          | description                                              |
+/// | ------ | ------------- | -------------------------------------------------------- |
+/// | 1      | `u8`          | `MessagePrefixByte`                                      |
+/// | 1      | `u8`          | frag group id (same for all fragments in msg.)           |
+/// | 1 or 2 | `u8` or `u16` | fragment id, depending on small/large flag               |
+/// | 1 or 2 | `u8` or `u16` | num fragments, depending on small/large flag             |
+/// | 2      | `u16`         | Payload Length, only on last fragment_id. Rest are 1024. |
+/// | ..     | Payload       |                                                          |
+///
+use crate::PacketeerError;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use log::error;
 
@@ -20,7 +65,7 @@ impl Fragment {
         writer: &mut BytesMut,
         payload_len: u16,
         size_mode: MessageSizeMode,
-    ) -> Result<(), ReliableError> {
+    ) -> Result<(), PacketeerError> {
         match size_mode {
             MessageSizeMode::Small => {
                 writer.put_u8(self.index as u8);
@@ -50,19 +95,19 @@ impl Fragment {
         reader: &mut Bytes,
         size_mode: MessageSizeMode,
         id: MessageId,
-    ) -> Result<(Self, u16), ReliableError> {
+    ) -> Result<(Self, u16), PacketeerError> {
         let (fragment_id, num_fragments) = match size_mode {
             MessageSizeMode::Small => {
                 if reader.remaining() < 2 {
                     error!("parse message error 4");
-                    return Err(ReliableError::InvalidMessage);
+                    return Err(PacketeerError::InvalidMessage);
                 }
                 (reader.get_u8() as u16, reader.get_u8() as u16)
             }
             MessageSizeMode::Large => {
                 if reader.remaining() < 4 {
                     error!("parse message error 5");
-                    return Err(ReliableError::InvalidMessage);
+                    return Err(PacketeerError::InvalidMessage);
                 }
                 (reader.get_u16(), reader.get_u16())
             }
@@ -70,7 +115,7 @@ impl Fragment {
         let payload_size = if fragment_id == num_fragments - 1 {
             if reader.remaining() < 2 {
                 error!("parse message error 6");
-                return Err(ReliableError::InvalidMessage);
+                return Err(PacketeerError::InvalidMessage);
             }
             reader.get_u16()
         } else {
@@ -190,7 +235,7 @@ impl Message {
     }
 
     // TODO check reminaing and error if writes will panic
-    pub fn write(&self, writer: &mut BytesMut) -> Result<(), ReliableError> {
+    pub fn write(&self, writer: &mut BytesMut) -> Result<(), PacketeerError> {
         let mut prefix_byte = 0_u8;
         if self.fragment.is_some() {
             prefix_byte = 1;
@@ -220,10 +265,10 @@ impl Message {
         Ok(())
     }
 
-    pub fn parse(reader: &mut Bytes) -> Result<Self, ReliableError> {
+    pub fn parse(reader: &mut Bytes) -> Result<Self, PacketeerError> {
         if reader.remaining() < 1 {
             error!("parse message error 1");
-            return Err(ReliableError::InvalidMessage);
+            return Err(PacketeerError::InvalidMessage);
         }
         let prefix_byte = reader.get_u8();
         let fragmented = prefix_byte & 1 != 0;
@@ -241,14 +286,14 @@ impl Message {
                 MessageSizeMode::Small => {
                     if reader.remaining() < 1 {
                         error!("parse message error 2");
-                        return Err(ReliableError::InvalidMessage);
+                        return Err(PacketeerError::InvalidMessage);
                     }
                     reader.get_u8() as u16
                 }
                 MessageSizeMode::Large => {
                     if reader.remaining() < 2 {
                         error!("parse message error 3");
-                        return Err(ReliableError::InvalidMessage);
+                        return Err(PacketeerError::InvalidMessage);
                     }
                     reader.get_u16()
                 }
@@ -260,7 +305,7 @@ impl Message {
         };
 
         if reader.remaining() < payload_size as usize {
-            return Err(ReliableError::InvalidMessage);
+            return Err(PacketeerError::InvalidMessage);
         }
         let payload = reader.split_to(payload_size as usize);
         Ok(Self {

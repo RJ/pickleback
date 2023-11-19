@@ -1,4 +1,4 @@
-use crate::ReliableError;
+use crate::PacketeerError;
 use std::num::Wrapping;
 
 pub struct SequenceBuffer<T>
@@ -66,7 +66,7 @@ where
         Some(&mut self.entries[index])
     }
 
-    pub fn insert(&mut self, data: T, sequence: u16) -> Result<&mut T, ReliableError> {
+    pub fn insert(&mut self, data: T, sequence: u16) -> Result<&mut T, PacketeerError> {
         if Self::sequence_less_than(
             sequence,
             (Wrapping(self.sequence) - Wrapping(self.len() as u16)).0,
@@ -76,7 +76,7 @@ where
                 "{} Sequence too old to insert: {sequence}",
                 self.type_name()
             );
-            return Err(ReliableError::SequenceBufferFull);
+            return Err(PacketeerError::SequenceBufferFull);
         }
         // log::info!("{} Inserting {sequence}..", self.type_name());
         // are we inserting with a gap in the range? ie new sequence we are inserting at

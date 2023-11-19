@@ -1,4 +1,31 @@
-use crate::ReliableError;
+///
+/// ## Packet Anatomy
+///
+/// ### PrefixByte
+///
+/// Is a `u8` at the start of each packet.
+///
+/// | bits       |              | description                                                                            |
+/// | ---------- | ------------ | -------------------------------------------------------------------------------------- |
+/// | `-------X` | `=  0`       | X = 0  = regular packet containing messages                                            |
+/// | `---XXXX-` | `<< 1,2,3,4` | denotes size of ack mask. each of 4 bits meaning another byte of ack mask data follows |
+/// | `--X-----` | `<<5`        | sequence difference bit                                                                |
+/// | `XX------` | `<<6,7`      | currently unused                                                                       |
+///
+/// ### PacketHeader
+///
+/// | bytes              | type             | description                                                                                                     |
+/// | ------------------ | ---------------- | --------------------------------------------------------------------------------------------------------------- |
+/// | 1                  | `u8`             | `PrefixByte`                                                                                                    |
+/// | 2,3                | `u16_le`         | sequence                                                                                                        |
+/// | 4 or 4,5           | `u8` or `u16_le` | sequence_difference, depending on sequnce difference bit in PrefixByte. <br> `sequence` - `last_acked_sequence` |
+/// | 5,6,7,8 or 6,7,8,9 | `u8` x 1-4       | ack bits mask                                                                                                   |
+///
+///
+///
+///
+///
+use crate::PacketeerError;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use log::*;
 use std::num::Wrapping;
@@ -65,7 +92,7 @@ impl PacketHeader {
     }
 
     // max of 9 bytes?
-    pub fn write(&self, writer: &mut BytesMut) -> Result<(), ReliableError> {
+    pub fn write(&self, writer: &mut BytesMut) -> Result<(), PacketeerError> {
         if writer.remaining_mut() < 9 {
             panic!("::write given too-small BytesMut");
         }
@@ -125,16 +152,16 @@ impl PacketHeader {
         Ok(())
     }
 
-    pub fn parse(reader: &mut Bytes) -> Result<Self, ReliableError> {
+    pub fn parse(reader: &mut Bytes) -> Result<Self, PacketeerError> {
         if reader.remaining() < 3 {
             error!("Packet too small for packet header (1)");
-            return Err(ReliableError::PacketTooSmall);
+            return Err(PacketeerError::PacketTooSmall);
         }
         let prefix_byte = reader.get_u8();
 
         if prefix_byte & 1 != 0 {
             error!("prefix byte does not indicate regular packet");
-            return Err(ReliableError::InvalidPacket);
+            return Err(PacketeerError::InvalidPacket);
         }
 
         let mut ack_bits: u32 = 0xFFFF_FFFF;
@@ -143,7 +170,7 @@ impl PacketHeader {
         let ack = if prefix_byte & (1 << 5) != 0 {
             if reader.remaining() < 1 {
                 error!("Packet too small for packet header (2)");
-                return Err(ReliableError::InvalidPacket);
+                return Err(PacketeerError::InvalidPacket);
             }
             let sequence_difference = reader.get_u8();
             (Wrapping(sequence) - Wrapping(u16::from(sequence_difference))).0
@@ -153,7 +180,7 @@ impl PacketHeader {
                     "Packet too small for packet header (3), remaining = {}",
                     reader.remaining()
                 );
-                return Err(ReliableError::InvalidPacket);
+                return Err(PacketeerError::InvalidPacket);
             }
             reader.get_u16_le()
         };
@@ -166,7 +193,7 @@ impl PacketHeader {
         }
         if reader.remaining() < expected_ack_bytes {
             error!("Packet too small for packet header (4) expected_ack_bytes: {expected_ack_bytes} remaining: {}", reader.remaining());
-            return Err(ReliableError::InvalidPacket);
+            return Err(PacketeerError::InvalidPacket);
         }
 
         if prefix_byte & (1 << 1) != 0 {
