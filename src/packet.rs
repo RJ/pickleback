@@ -29,9 +29,9 @@ impl PacketHeader {
         self.ack_bits
     }
 
-    pub fn max_possible_size() -> usize {
-        9
-    }
+    // pub fn max_possible_size() -> usize {
+    //     9
+    // }
 
     pub fn size(&self) -> usize {
         let mut size: usize = 3;

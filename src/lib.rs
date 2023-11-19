@@ -31,13 +31,12 @@ pub mod prelude {
     pub use super::config::EndpointConfig;
     pub use super::error::ReliableError;
     pub use super::jitter_pipe::JitterPipeConfig;
-    pub use super::tracking::EndpointCounters;
+    pub use super::tracking::PacketeerStats;
     pub use super::Packeteer;
     pub use super::ReceivedMessage;
 }
 
 pub struct ReceivedMessage {
-    /// ids on received msgs are used internally for uniqueness and ordering
     pub id: MessageId,
     pub channel: u8,
     pub payload: Bytes,
@@ -68,7 +67,7 @@ pub struct Packeteer {
     channels: ChannelList,
     sent_buffer: SequenceBuffer<SentData>,
     recv_buffer: SequenceBuffer<RecvData>,
-    counters: EndpointCounters,
+    counters: PacketeerStats,
     outbox: VecDeque<Bytes>,
 }
 
@@ -79,9 +78,6 @@ impl Default for Packeteer {
 }
 
 /// Represents one end of a datagram stream between two peers, one of which is the server.
-///
-/// ultimately probably want channels, IDed by a u8. then we can have per-channel settings.
-/// eg ordering guarantees, reliability of messages, retransmit time, etc.
 ///
 impl Packeteer {
     pub fn new(config: EndpointConfig, time: f64) -> Self {
@@ -96,7 +92,7 @@ impl Packeteer {
             sent_buffer: SequenceBuffer::with_capacity(config.sent_packets_buffer_size),
             recv_buffer: SequenceBuffer::with_capacity(config.received_packets_buffer_size),
             dispatcher: MessageDispatcher::default(),
-            counters: EndpointCounters::default(),
+            counters: PacketeerStats::default(),
             outbox: VecDeque::new(),
             channels,
         }
@@ -112,7 +108,10 @@ impl Packeteer {
     pub fn drain_packets_to_send(
         &mut self,
     ) -> std::collections::vec_deque::Drain<'_, bytes::Bytes> {
-        self.write_packets_to_send();
+        match self.write_packets_to_send() {
+            Ok(..) => {}
+            Err(e) => warn!("{e:?}"),
+        }
         self.outbox.drain(..)
     }
     // used by tests
@@ -127,12 +126,12 @@ impl Packeteer {
     }
 
     #[allow(unused)]
-    pub fn counters(&self) -> &EndpointCounters {
+    pub fn counters(&self) -> &PacketeerStats {
         &self.counters
     }
 
     #[allow(unused)]
-    pub fn sent_info(&self, sent_handle: SentHandle) -> Option<&SentData> {
+    pub(crate) fn sent_info(&self, sent_handle: SentHandle) -> Option<&SentData> {
         self.sent_buffer.get(sent_handle.0)
     }
 

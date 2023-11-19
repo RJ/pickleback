@@ -52,7 +52,7 @@ impl Default for RecvData {
 }
 
 #[derive(Default, Debug, Clone)]
-pub struct EndpointCounters {
+pub struct PacketeerStats {
     pub packets_sent: u64,
     pub packets_received: u64,
     pub packets_acked: u64,

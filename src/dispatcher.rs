@@ -1,7 +1,4 @@
-use std::default;
-
 use crate::*;
-// use log::*;
 
 #[derive(Default, Debug)]
 pub(crate) struct MessageHandle {
@@ -136,7 +133,7 @@ impl MessageDispatcher {
     fn add_large_message_to_channel(
         &mut self,
         channel: &mut Box<dyn Channel>,
-        mut payload: &[u8],
+        payload: &[u8],
     ) -> MessageId {
         assert!(payload.len() > 1024);
         // all fragments use the same message id.
@@ -169,7 +166,7 @@ impl MessageDispatcher {
                 num_fragments,
                 parent_id,
             };
-            let start = usize::from(index as usize * 1024);
+            let start = index as usize * 1024;
             let end = start + payload_size as usize;
             let frag_payload = &payload[start..end];
             channel.enqueue_message(id, frag_payload, Fragmented::Yes(fragment));

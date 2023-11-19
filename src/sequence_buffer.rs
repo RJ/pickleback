@@ -1,7 +1,4 @@
-use rand::seq;
-
 use crate::ReliableError;
-// use log::*;
 use std::num::Wrapping;
 
 pub struct SequenceBuffer<T>
