@@ -169,17 +169,6 @@ impl Packeteer {
         header
     }
 
-    fn register_sent_packet(
-        &mut self,
-        sequence: u16,
-        packet_len: usize,
-    ) -> Result<(), PacketeerError> {
-        let send_size = packet_len + self.config.packet_header_size;
-        let sent = SentData::new(self.time, send_size);
-        self.sent_buffer.insert(sent, sequence)?;
-        Ok(())
-    }
-
     // when creating the messages, we want one big BytesMut?? with views into it, refcounted so
     // once no more messages are alive, it's cleaned up? then we can do a large contiguous allocation
     // for lots of small message buffers..
@@ -373,7 +362,7 @@ mod tests {
     // use log::{debug, error, info, trace, warn};
 
     #[test]
-    fn duplicates_dropped() {
+    fn drop_duplicate_packets() {
         init_logger();
 
         let mut server = Packeteer::default();
