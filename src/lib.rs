@@ -364,7 +364,7 @@ impl Packeteer {
 
 #[cfg(test)]
 mod tests {
-    use crate::jitter_pipe::{JitterPipe, JitterPipeConfig};
+    use crate::jitter_pipe::JitterPipeConfig;
 
     use super::*;
     use test_utils::*;
@@ -378,7 +378,7 @@ mod tests {
         let mut server = Packeteer::default();
         let mut client = Packeteer::default();
         let payload = Bytes::from_static(b"hello");
-        let msg_id = server.send_message(0, payload.as_ref());
+        let _msg_id = server.send_message(0, payload.as_ref());
 
         let to_send = server.drain_packets_to_send().collect::<Vec<_>>();
         assert_eq!(to_send.len(), 1);
@@ -404,7 +404,6 @@ mod tests {
     fn acks() {
         crate::test_utils::init_logger();
 
-        let time = 100.0;
         let test_data = &[0x41; 24]; // "AAA..."
 
         let mut server = Packeteer::default();
@@ -424,7 +423,7 @@ mod tests {
 
             // forward packets to their endpoints
             server.drain_packets_to_send().for_each(|packet| {
-                client.process_incoming_packet(packet);
+                client.process_incoming_packet(packet).unwrap();
                 assert_eq!(
                     test_data,
                     client
@@ -437,7 +436,7 @@ mod tests {
             });
             assert!(!server.has_packets_to_send());
             client.drain_packets_to_send().for_each(|packet| {
-                server.process_incoming_packet(packet);
+                server.process_incoming_packet(packet).unwrap();
                 assert_eq!(
                     test_data,
                     server

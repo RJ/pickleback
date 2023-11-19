@@ -176,7 +176,6 @@ where
 mod tests {
     use super::*;
     use crate::test_utils::*;
-    use log::info;
 
     #[test]
     fn gappy_inserts() {
