@@ -3,16 +3,6 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use log::*;
 use std::num::Wrapping;
 
-pub trait HeaderParser {
-    type T;
-
-    fn max_possible_size() -> usize;
-
-    fn size(&self) -> usize;
-    fn write(&self, writer: &mut BytesMut) -> Result<(), ReliableError>;
-    fn parse(reader: &mut Bytes) -> Result<Self::T, ReliableError>;
-}
-
 #[derive(Clone, PartialEq, PartialOrd, Debug, Default)]
 pub struct PacketHeader {
     sequence: u16,
@@ -38,14 +28,12 @@ impl PacketHeader {
     pub fn ack_bits(&self) -> u32 {
         self.ack_bits
     }
-}
 
-impl HeaderParser for PacketHeader {
-    type T = Self;
-    fn max_possible_size() -> usize {
+    pub fn max_possible_size() -> usize {
         9
     }
-    fn size(&self) -> usize {
+
+    pub fn size(&self) -> usize {
         let mut size: usize = 3;
 
         let mut sequence_difference = i32::from((Wrapping(self.sequence) - Wrapping(self.ack)).0);
@@ -77,7 +65,7 @@ impl HeaderParser for PacketHeader {
     }
 
     // max of 9 bytes?
-    fn write(&self, writer: &mut BytesMut) -> Result<(), ReliableError> {
+    pub fn write(&self, writer: &mut BytesMut) -> Result<(), ReliableError> {
         if writer.remaining_mut() < 9 {
             panic!("::write given too-small BytesMut");
         }
@@ -137,7 +125,7 @@ impl HeaderParser for PacketHeader {
         Ok(())
     }
 
-    fn parse(reader: &mut Bytes) -> Result<Self, ReliableError> {
+    pub fn parse(reader: &mut Bytes) -> Result<Self, ReliableError> {
         if reader.remaining() < 3 {
             error!("Packet too small for packet header (1)");
             return Err(ReliableError::PacketTooSmall);

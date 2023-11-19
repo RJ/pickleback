@@ -37,8 +37,8 @@ impl TestHarness {
     pub(crate) fn new(config: JitterPipeConfig) -> Self {
         let server_jitter_pipe = JitterPipe::<Bytes>::new(config.clone());
         let client_jitter_pipe = JitterPipe::<Bytes>::new(config);
-        let server = Packeteer::new(1_f64);
-        let client = Packeteer::new(1_f64);
+        let server = Packeteer::default();
+        let client = Packeteer::default();
         Self {
             server,
             client,

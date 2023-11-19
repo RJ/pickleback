@@ -69,25 +69,6 @@ where
         Some(&mut self.entries[index])
     }
 
-    /*
-       the range removal thing is not what i want.
-       it assumes the buffer ahead of most recently inserted sequence is junk, and wipes it
-       when inserting anything greater than last inserted seq + 1.
-
-       so if you insert in the following order of packet arrival:
-       1,
-       2,
-       3
-       4,
-       8, (wipes 5,6,7,8, because current seq is 4)
-       6,
-       9, (wipes 7,8,9 because current seq is 6)
-
-       you lose 6. (and 6 doesn't get included in the ack_bits)
-
-       maybe better to just drag a deletion window u16::MAX/2 wide, u16::MAX/2 behind us?
-
-    */
     pub fn insert(&mut self, data: T, sequence: u16) -> Result<&mut T, ReliableError> {
         if Self::sequence_less_than(
             sequence,
