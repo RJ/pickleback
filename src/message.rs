@@ -50,7 +50,6 @@ use crate::{
     PacketeerError,
 };
 use byteorder::{NetworkEndian, ReadBytesExt, WriteBytesExt};
-use log::error;
 
 pub type MessageId = u16;
 
@@ -251,11 +250,11 @@ impl Message {
         self.channel
     }
     pub fn as_slice(&self) -> &[u8] {
-        &self.buffer.as_slice()
+        self.buffer.as_slice()
     }
 
     pub fn buffer(&self) -> &Vec<u8> {
-        &*self.buffer
+        &self.buffer
     }
 
     pub fn size(&self) -> usize {
@@ -348,7 +347,7 @@ impl Message {
         };
         // copy payload from reader into buf
         let mut buf = pool.get_buffer(payload_size as usize);
-        reader.take(payload_size as u64).read_to_end(&mut *buf);
+        reader.take(payload_size as u64).read_to_end(&mut buf)?;
 
         Ok(Self {
             id,
@@ -370,7 +369,7 @@ mod tests {
     #[test]
     fn message_serialization() {
         crate::test_utils::init_logger();
-        let pool = BufPool::new();
+        let pool = BufPool::empty();
 
         let payload1 = b"HELLO";
         let payload2 = b"FRAGMENTED";
@@ -419,7 +418,7 @@ mod tests {
     #[test]
     fn fragment_message_serialization() {
         crate::test_utils::init_logger();
-        let pool = BufPool::new();
+        let pool = BufPool::empty();
 
         // fragment messages (except the last) have a fixed size of 1024 bytes
         let payload = &[41; 1024];

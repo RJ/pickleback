@@ -308,7 +308,7 @@ mod tests {
     #[test]
     fn unreliable_channel() {
         crate::test_utils::init_logger();
-        let pool = BufPool::new();
+        let pool = BufPool::empty();
         let mut channel = UnreliableChannel::new(0, 1.0);
         let payload = b"hello";
         channel.enqueue_message(&pool, 0, payload, Fragmented::No);
@@ -321,7 +321,7 @@ mod tests {
     #[test]
     fn reliable_channel() {
         crate::test_utils::init_logger();
-        let pool = BufPool::new();
+        let pool = BufPool::empty();
         let channel_id = 0;
         let mut channel = ReliableChannel::new(channel_id, 1.0);
         let payload = b"hello";

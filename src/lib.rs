@@ -41,6 +41,8 @@ pub mod prelude {
     pub use super::Packeteer;
 }
 
+pub const MAX_MESSAGE_LEN: usize = 1024 * 1024;
+
 /// returned from send - contains packet seqno
 #[derive(Debug, Eq, PartialEq, Hash)]
 pub struct SentHandle(u16);
@@ -83,7 +85,7 @@ impl Packeteer {
             counters: PacketeerStats::default(),
             outbox: VecDeque::new(),
             channels,
-            pool: BufPool::new(),
+            pool: BufPool::default(),
         }
     }
 
@@ -155,14 +157,6 @@ impl Packeteer {
         header
     }
 
-    // when creating the messages, we want one big BytesMut?? with views into it, refcounted so
-    // once no more messages are alive, it's cleaned up? then we can do a large contiguous allocation
-    // for lots of small message buffers..
-    // otherwise it's fragmenty af
-    // it's almost an arena allocator cleared per frame, but some messages might not be sent until next frame,
-    // and reliables need to stick around even longer..
-    //
-    //
     fn write_packets_to_send(&mut self) -> Result<(), PacketeerError> {
         // info!("write packets.");
         let mut sent_something = false;
@@ -267,7 +261,7 @@ impl Packeteer {
     /// parse out the messages for returning.
     ///
     ///  TODO make this take a &[u8] too?
-    pub fn process_incoming_packet(&mut self, mut buffer: BufHandle) -> Result<(), PacketeerError> {
+    pub fn process_incoming_packet(&mut self, buffer: BufHandle) -> Result<(), PacketeerError> {
         self.counters.packets_received += 1;
         let mut reader = Cursor::new(buffer.as_ref());
         let header: PacketHeader = PacketHeader::parse(&mut reader)?;
@@ -622,7 +616,7 @@ mod tests {
     #[test]
     fn reject_duplicate_messages() {
         crate::test_utils::init_logger();
-        let pool = BufPool::new();
+        let pool = BufPool::empty();
         let channel = 0;
         let mut harness = TestHarness::new(JitterPipeConfig::disabled());
         let payload = b"hello";
