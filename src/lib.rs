@@ -8,6 +8,7 @@ use std::{
 mod buffer_pool;
 mod channel;
 mod config;
+mod cursor;
 mod dispatcher;
 mod error;
 mod jitter_pipe;
@@ -72,8 +73,8 @@ impl Default for Packeteer {
 impl Packeteer {
     pub fn new(config: PacketeerConfig, time: f64) -> Self {
         let mut channels = ChannelList::default();
-        channels.put(Box::new(UnreliableChannel::new(0, time)));
-        channels.put(Box::new(ReliableChannel::new(1, time)));
+        channels.insert(Box::new(UnreliableChannel::new(0, time)));
+        channels.insert(Box::new(ReliableChannel::new(1, time)));
         Self {
             time,
             rtt: 0.0,
@@ -218,7 +219,7 @@ impl Packeteer {
             self.dispatcher.set_packet_message_handles(
                 SentHandle(self.sequence),
                 take(&mut message_handles_in_packet),
-            );
+            )?;
         }
 
         // if no Messages to send, we'll still send an empty-payload packet, so that

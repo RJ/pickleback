@@ -1,6 +1,6 @@
 use crate::*;
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone, Copy)]
 pub(crate) struct MessageHandle {
     pub(crate) id: MessageId,
     pub(crate) frag_index: Option<u16>,
@@ -16,15 +16,26 @@ impl MessageHandle {
     }
 }
 
-#[derive(Default)]
 pub(crate) struct MessageDispatcher {
     next_message_id: MessageId,
     sent_frag_map: SentFragMap,
-    messages_in_packets: HashMap<SentHandle, Vec<MessageHandle>>,
+    messages_in_packets: SequenceBuffer<Vec<MessageHandle>>, // HashMap<SentHandle, Vec<MessageHandle>>,
     message_reassembler: MessageReassembler,
-    /// received fully assembled messages ready for the consumer:
-    message_inbox: HashMap<u8, Vec<ReceivedMessage>>,
-    ack_inbox: HashMap<u8, Vec<MessageId>>,
+    message_inbox: smallmap::Map<u8, Vec<ReceivedMessage>>,
+    ack_inbox: smallmap::Map<u8, Vec<MessageId>>,
+}
+
+impl Default for MessageDispatcher {
+    fn default() -> Self {
+        Self {
+            next_message_id: 0,
+            sent_frag_map: SentFragMap::default(),
+            messages_in_packets: SequenceBuffer::with_capacity(10000), // TODO how many unaccounted for packets do we support?
+            message_reassembler: MessageReassembler::default(),
+            message_inbox: smallmap::Map::default(),
+            ack_inbox: smallmap::Map::default(),
+        }
+    }
 }
 
 impl MessageDispatcher {
@@ -64,9 +75,10 @@ impl MessageDispatcher {
         &mut self,
         packet_handle: SentHandle,
         message_handles: Vec<MessageHandle>,
-    ) {
+    ) -> Result<(), PacketeerError> {
         self.messages_in_packets
-            .insert(packet_handle, message_handles);
+            .insert(message_handles, packet_handle.0)?;
+        Ok(())
     }
 
     // updates ack_inbox with messages acked as a result of this packet being acks.
@@ -78,7 +90,7 @@ impl MessageDispatcher {
     ) {
         // check message handles that were just acked - if any are fragments, we need to log that
         // in the frag map, incase it results in a parent message id being acked (ie, all frag messages are now acked)
-        if let Some(msg_handles) = self.messages_in_packets.remove(packet_handle) {
+        if let Some(msg_handles) = self.messages_in_packets.remove(packet_handle.0) {
             info!("Acked packet: {packet_handle:?} --> acked msgs: {msg_handles:?}");
             for msg_handle in &msg_handles {
                 // let channel know, so it doesn't retransmit this message:

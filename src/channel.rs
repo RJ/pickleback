@@ -1,99 +1,8 @@
 use crate::*;
-
-// resend time could be dynamic based on recent rtt calculations per client?
-
-// #[derive(Debug, Clone)]
-// pub struct ChannelConfig {
-//     id: u8,
-//     reliable: bool,
-//     ordered: bool,
-//     resend_time: Option<Duration>,
-// }
-
-// pub enum DefaultChannels {
-//     Unreliable,
-//     Reliable,
-// }
-
-// impl From<DefaultChannels> for u8 {
-//     fn from(value: DefaultChannels) -> Self {
-//         match value {
-//             DefaultChannels::Unreliable => 0,
-//             DefaultChannels::Reliable => 1,
-//         }
-//     }
-// }
-
-// impl DefaultChannels {
-//     pub fn channel_config() -> Vec<ChannelConfig> {
-//         vec![
-//             ChannelConfig {
-//                 id: 0,
-//                 reliable: false,
-//                 ordered: false,
-//                 resend_time: None,
-//             },
-//             ChannelConfig {
-//                 id: 1,
-//                 reliable: true,
-//                 ordered: false,
-//                 resend_time: Some(Duration::from_millis(100)),
-//             },
-//         ]
-//     }
-// }
-
-// in lieu of a HashMap<u8,T>, since we have a fixed small number of channel ids
-pub(crate) struct ChannelIdMap<T>([Option<T>; 32]);
-impl<T> Default for ChannelIdMap<T> {
-    fn default() -> Self {
-        Self(std::array::from_fn(|_| None))
-    }
-}
-impl<T> ChannelIdMap<T> {
-    fn get_mut(&mut self, id: u8) -> Option<&mut T> {
-        self.0.get_mut(id as usize).unwrap().as_mut()
-    }
-    fn insert(&mut self, id: u8, value: T) {
-        assert!((id as usize) < self.0.len(), "channel id out of bounds");
-        self.0[id as usize] = Some(value);
-    }
-    fn all(&self) -> impl Iterator<Item = &T> {
-        self.0.iter().filter_map(|c| c.as_ref())
-    }
-    fn all_mut(&mut self) -> impl Iterator<Item = &mut T> {
-        self.0.iter_mut().filter_map(|c| c.as_mut())
-    }
-}
+pub const MAX_CHANNELS: usize = 32;
 
 type BoxedChannel = Box<dyn Channel>;
 
-#[derive(Default)]
-pub(crate) struct ChannelList {
-    channels: ChannelIdMap<BoxedChannel>,
-}
-impl ChannelList {
-    pub(crate) fn get_mut(&mut self, id: u8) -> Option<&mut Box<dyn Channel>> {
-        self.channels.get_mut(id)
-    }
-    pub(crate) fn put(&mut self, channel: Box<dyn Channel>) {
-        self.channels.insert(channel.id(), channel);
-    }
-    pub(crate) fn all_mut(&mut self) -> impl Iterator<Item = &mut BoxedChannel> {
-        self.channels.all_mut()
-    }
-    pub(crate) fn all_non_empty_mut(&mut self) -> impl Iterator<Item = &mut BoxedChannel> {
-        self.channels.all_mut().filter(|c| c.any_ready_to_send())
-    }
-    pub(crate) fn any_with_messages_to_send(&self) -> bool {
-        for ch in self.channels.all() {
-            if ch.any_ready_to_send() {
-                return true;
-            }
-        }
-        false
-    }
-}
 pub(crate) trait Channel {
     fn id(&self) -> u8;
     fn update(&mut self, time: f64);
@@ -345,5 +254,36 @@ mod tests {
         channel.update(1.0);
         // none available, the ack removed it
         assert!(!channel.any_ready_to_send());
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct ChannelList {
+    channels: smallmap::Map<u8, BoxedChannel>,
+}
+impl ChannelList {
+    pub(crate) fn get_mut(&mut self, id: u8) -> Option<&mut Box<dyn Channel>> {
+        self.channels.get_mut(&id)
+    }
+    pub(crate) fn insert(&mut self, channel: Box<dyn Channel>) {
+        assert!(
+            (channel.id() as usize) < MAX_CHANNELS,
+            "channel.id exceeds max"
+        );
+        self.channels.insert(channel.id(), channel);
+    }
+    pub(crate) fn all_mut(&mut self) -> impl Iterator<Item = &mut BoxedChannel> {
+        self.channels.values_mut()
+    }
+    pub(crate) fn all_non_empty_mut(&mut self) -> impl Iterator<Item = &mut BoxedChannel> {
+        self.channels.values_mut().filter(|c| c.any_ready_to_send())
+    }
+    pub(crate) fn any_with_messages_to_send(&self) -> bool {
+        for ch in self.channels.values() {
+            if ch.any_ready_to_send() {
+                return true;
+            }
+        }
+        false
     }
 }

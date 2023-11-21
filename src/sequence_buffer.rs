@@ -108,11 +108,18 @@ where
         self.remove(range.end);
     }
 
-    pub fn remove(&mut self, sequence: u16) {
+    pub fn remove(&mut self, sequence: u16) -> Option<T> {
         // TODO: validity check
         let index = self.index(sequence);
-        self.entries[index] = T::default();
+        let ret = if self.entry_sequences[index] != u32::from(sequence) {
+            self.entries[index] = T::default();
+            None
+        } else {
+            let el = self.entries.get_mut(index).unwrap();
+            Some(std::mem::take(el))
+        };
         self.entry_sequences[index] = 0xFFFF_FFFF;
+        ret
     }
 
     pub fn sequence(&self) -> u16 {

@@ -1,5 +1,3 @@
-use std::io::{Cursor, Read, Write};
-
 ///
 /// ### Message header
 ///
@@ -8,7 +6,7 @@ use std::io::{Cursor, Read, Write};
 ///
 /// ### Small flag
 ///
-/// * For non-frag msgs, payload size is a u8 (256b msgs)
+/// * For non-frag msgs, payload size is a u8 (<256 byte msgs)
 /// * for frags, number of fragments, and also fragment id, uses u8 (256kB payloads)
 ///
 /// ### Large flag
@@ -36,20 +34,24 @@ use std::io::{Cursor, Read, Write};
 /// need to take care with multiple frag groups in flight - ensure no overlap or we get old frags..
 /// also can probably pack frag group, id, num frags more concisely.
 ///
+/// Because message ids are issued sequentially, you can always calculate the parent message id
+/// of a fragment by subtracting the fragment index from the message id.
+///
 /// | bytes  | type          | description                                              |
 /// | ------ | ------------- | -------------------------------------------------------- |
 /// | 1      | `u8`          | `MessagePrefixByte`                                      |
-/// | 1      | `u8`          | frag group id (same for all fragments in msg.)           |
-/// | 1 or 2 | `u8` or `u16` | fragment id, depending on small/large flag               |
+/// | 1 or 2 | `u8` or `u16` | fragment index, depending on small/large flag               |
 /// | 1 or 2 | `u8` or `u16` | num fragments, depending on small/large flag             |
 /// | 2      | `u16`         | Payload Length, only on last fragment_id. Rest are 1024. |
 /// | ..     | Payload       |                                                          |
 ///
 use crate::{
     buffer_pool::{BufHandle, BufPool},
+    cursor::CursorExtras,
     PacketeerError,
 };
 use byteorder::{NetworkEndian, ReadBytesExt, WriteBytesExt};
+use std::io::{Cursor, Read, Write};
 
 pub type MessageId = u16;
 
@@ -90,13 +92,12 @@ impl Fragment {
         if self.is_last() {
             assert!(payload_len <= 1024);
             writer.write_u16::<NetworkEndian>(payload_len)?;
-        } else {
-            // TODO return error here? can we even get corrupted packets off our webrtc transport?
-            // do we get checksums for free?
-            assert_eq!(
-                payload_len, 1024,
-                "non-last frag packets should have payload size of 1024"
+        } else if payload_len != 1024 {
+            // not possible in transports that checksum - truncated packets manifest as drops.
+            log::error!(
+                "Non-final fragment should always have payload size 1024. got {payload_len}."
             );
+            return Err(PacketeerError::InvalidMessage);
         }
         Ok(())
     }
@@ -347,6 +348,10 @@ impl Message {
         };
         // copy payload from reader into buf
         let mut buf = pool.get_buffer(payload_size as usize);
+        if reader.remaining() < payload_size as u64 {
+            log::warn!("Payload appears truncated for message {id}");
+            return Err(PacketeerError::InvalidMessage);
+        }
         reader.take(payload_size as u64).read_to_end(&mut buf)?;
 
         Ok(Self {
