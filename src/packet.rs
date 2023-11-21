@@ -26,9 +26,9 @@
 ///
 ///
 use crate::PacketeerError;
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use byteorder::{NetworkEndian, ReadBytesExt, WriteBytesExt};
 use log::*;
-use std::num::Wrapping;
+use std::{io::Cursor, num::Wrapping};
 
 #[derive(Clone, PartialEq, PartialOrd, Debug, Default)]
 pub struct PacketHeader {
@@ -92,10 +92,10 @@ impl PacketHeader {
     }
 
     // max of 9 bytes?
-    pub fn write(&self, writer: &mut BytesMut) -> Result<(), PacketeerError> {
-        if writer.remaining_mut() < 9 {
-            panic!("::write given too-small BytesMut");
-        }
+    pub fn write(&self, writer: &mut Cursor<&mut Vec<u8>>) -> Result<(), PacketeerError> {
+        // if writer.remaining_mut() < 9 {
+        //     panic!("::write given too-small BytesMut");
+        // }
 
         let mut prefix_byte = 0;
 
@@ -124,40 +124,36 @@ impl PacketHeader {
             prefix_byte |= 1 << 5;
         }
 
-        writer.put_u8(prefix_byte); // 1
-        writer.put_u16_le(self.sequence); // +2 = 3
+        writer.write_u8(prefix_byte)?; // 1
+        writer.write_u16::<NetworkEndian>(self.sequence)?; // +2 = 3
 
         if sequence_difference <= 255 {
-            writer.put_u8(sequence_difference as u8); // +1 = 4
+            writer.write_u8(sequence_difference as u8)?; // +1 = 4
         } else {
-            writer.put_u16_le(self.ack); // or +2 = 5
+            writer.write_u16::<NetworkEndian>(self.ack)?; // or +2 = 5
         }
         // +4:
         if (self.ack_bits & 0x0000_00FF) != 0x0000_00FF {
-            writer.put_u8((self.ack_bits & 0x0000_00FF) as u8);
+            writer.write_u8((self.ack_bits & 0x0000_00FF) as u8)?;
         }
 
         if (self.ack_bits & 0x0000_FF00) != 0x0000_FF00 {
-            writer.put_u8(((self.ack_bits & 0x0000_FF00) >> 8) as u8);
+            writer.write_u8(((self.ack_bits & 0x0000_FF00) >> 8) as u8)?;
         }
 
         if (self.ack_bits & 0x00FF_0000) != 0x00FF_0000 {
-            writer.put_u8(((self.ack_bits & 0x00FF_0000) >> 16) as u8);
+            writer.write_u8(((self.ack_bits & 0x00FF_0000) >> 16) as u8)?;
         }
 
         if (self.ack_bits & 0xFF00_0000) != 0xFF00_0000 {
-            writer.put_u8(((self.ack_bits & 0xFF00_0000) >> 24) as u8);
+            writer.write_u8(((self.ack_bits & 0xFF00_0000) >> 24) as u8)?;
         }
 
         Ok(())
     }
 
-    pub fn parse(reader: &mut Bytes) -> Result<Self, PacketeerError> {
-        if reader.remaining() < 3 {
-            error!("Packet too small for packet header (1)");
-            return Err(PacketeerError::PacketTooSmall);
-        }
-        let prefix_byte = reader.get_u8();
+    pub fn parse(reader: &mut Cursor<&Vec<u8>>) -> Result<Self, PacketeerError> {
+        let prefix_byte = reader.read_u8()?;
 
         if prefix_byte & 1 != 0 {
             error!("prefix byte does not indicate regular packet");
@@ -165,55 +161,44 @@ impl PacketHeader {
         }
 
         let mut ack_bits: u32 = 0xFFFF_FFFF;
-        let sequence = reader.get_u16_le();
+        let sequence = reader.read_u16::<NetworkEndian>()?;
         // ack is greatest seqno seen?
         let ack = if prefix_byte & (1 << 5) != 0 {
-            if reader.remaining() < 1 {
-                error!("Packet too small for packet header (2)");
-                return Err(PacketeerError::InvalidPacket);
-            }
-            let sequence_difference = reader.get_u8();
+            let sequence_difference = reader.read_u8()?;
             (Wrapping(sequence) - Wrapping(u16::from(sequence_difference))).0
         } else {
-            if reader.remaining() < 2 {
-                error!(
-                    "Packet too small for packet header (3), remaining = {}",
-                    reader.remaining()
-                );
-                return Err(PacketeerError::InvalidPacket);
-            }
-            reader.get_u16_le()
+            reader.read_u16::<NetworkEndian>()?
         };
 
-        let mut expected_ack_bytes: usize = 0;
-        for i in 1..5 {
-            if prefix_byte & (1 << i) != 0 {
-                expected_ack_bytes += 1;
-            }
-        }
-        if reader.remaining() < expected_ack_bytes {
-            error!("Packet too small for packet header (4) expected_ack_bytes: {expected_ack_bytes} remaining: {}", reader.remaining());
-            return Err(PacketeerError::InvalidPacket);
-        }
+        // let mut expected_ack_bytes: usize = 0;
+        // for i in 1..5 {
+        //     if prefix_byte & (1 << i) != 0 {
+        //         expected_ack_bytes += 1;
+        //     }
+        // }
+        // if reader.remaining() < expected_ack_bytes {
+        //     error!("Packet too small for packet header (4) expected_ack_bytes: {expected_ack_bytes} remaining: {}", reader.remaining());
+        //     return Err(PacketeerError::InvalidPacket);
+        // }
 
         if prefix_byte & (1 << 1) != 0 {
             ack_bits &= 0xFFFF_FF00;
-            ack_bits |= u32::from(reader.get_u8());
+            ack_bits |= u32::from(reader.read_u8()?);
         }
 
         if prefix_byte & (1 << 2) != 0 {
             ack_bits &= 0xFFFF_00FF;
-            ack_bits |= u32::from(reader.get_u8()) << 8;
+            ack_bits |= u32::from(reader.read_u8()?) << 8;
         }
 
         if prefix_byte & (1 << 3) != 0 {
             ack_bits &= 0xFF00_FFFF;
-            ack_bits |= u32::from(reader.get_u8()) << 16;
+            ack_bits |= u32::from(reader.read_u8()?) << 16;
         }
 
         if prefix_byte & (1 << 4) != 0 {
             ack_bits &= 0x00FF_FFFF;
-            ack_bits |= u32::from(reader.get_u8()) << 24;
+            ack_bits |= u32::from(reader.read_u8()?) << 24;
         }
 
         Ok(Self {

@@ -1,8 +1,8 @@
 ///
-use bytes::{Buf, Bytes, BytesMut};
 use log::*;
 use std::{
     collections::{HashMap, VecDeque},
+    io::{Cursor, Write},
     mem::take,
 };
 mod buffer_pool;
@@ -55,7 +55,7 @@ pub struct Packeteer {
     sent_buffer: SequenceBuffer<SentData>,
     recv_buffer: SequenceBuffer<RecvData>,
     counters: PacketeerStats,
-    outbox: VecDeque<Bytes>,
+    outbox: VecDeque<BufHandle>,
     pool: BufPool,
 }
 
@@ -94,9 +94,7 @@ impl Packeteer {
     }
 
     /// draining iterator over packets in the outbox that we need to send over the network
-    pub fn drain_packets_to_send(
-        &mut self,
-    ) -> std::collections::vec_deque::Drain<'_, bytes::Bytes> {
+    pub fn drain_packets_to_send(&mut self) -> std::collections::vec_deque::Drain<'_, BufHandle> {
         match self.write_packets_to_send() {
             Ok(..) => {}
             Err(e) => warn!("{e:?}"),
@@ -172,16 +170,21 @@ impl Packeteer {
         let mut message_handles_in_packet = Vec::<MessageHandle>::new();
         let max_packet_size = self.config.max_packet_size;
 
-        let mut packet: Option<BytesMut> = None;
+        // let mut packet: Option<BytesMut> = None;
+        let mut packet: Option<BufHandle> = None;
+        let mut cursor: Option<Cursor<&mut Vec<u8>>> = None;
         let mut remaining_space = max_packet_size;
 
         // definitely scope to optimise these nested loops..
         // hopefully never sending too many packets per tick though, so maybe fine.
         while self.channels.any_with_messages_to_send() {
-            if packet.is_none() {
-                packet = Some(BytesMut::with_capacity(max_packet_size));
+            if cursor.is_none() {
+                packet = Some(self.pool.get_buffer(1300));
+                cursor = Some(Cursor::new(packet.as_mut().unwrap().as_mut()));
+
                 let header = self.next_packet_header();
-                header.write(packet.as_mut().unwrap())?;
+
+                header.write(cursor.as_mut().unwrap())?;
                 remaining_space = max_packet_size - header.size();
             }
 
@@ -193,16 +196,15 @@ impl Packeteer {
                 while let Some(msg) = channel.get_message_to_write_to_a_packet(remaining_space) {
                     any_found = true;
                     // trace!("* Writing {msg:?} to packet buffer..");
-                    packet.as_mut().unwrap().extend_from_slice(msg.buffer());
-                    // msg.buffer()
-                    // msg.write(packet.as_mut().unwrap())
-                    //     .expect("writing to a buffer shouldn't fail");
+                    cursor.as_mut().unwrap().write_all(msg.as_slice())?;
+
                     message_handles_in_packet.push(MessageHandle {
                         id: msg.id(),
                         frag_index: msg.fragment().map(|f| f.index),
                         channel: channel.id(),
                     });
-                    remaining_space = max_packet_size - packet.as_ref().unwrap().len();
+                    remaining_space =
+                        max_packet_size - cursor.as_ref().unwrap().position() as usize;
                     if remaining_space < 3 {
                         break 'non_empty_channels;
                     }
@@ -215,9 +217,8 @@ impl Packeteer {
                 continue;
             }
             sent_something = true;
-            // create final packet to send, leaving `packet` as None.
-            let final_packet = packet.take().unwrap().freeze();
-            self.send_packet(final_packet)?;
+            cursor = None;
+            self.send_packet(packet.take().unwrap())?;
             // track which message ids are in which packet handle, so that when a packet handle
             // is acked, we can ack the corresponding message ids
             self.dispatcher.set_packet_message_handles(
@@ -230,10 +231,11 @@ impl Packeteer {
         // acks are transmitted.
         // sending one empty packet per tick is fine.. right? what about uncapped headless server?
         if !sent_something {
-            let mut empty_packet = BytesMut::with_capacity(max_packet_size);
+            packet = Some(self.pool.get_buffer(1300));
+            cursor = Some(Cursor::new(packet.as_mut().unwrap().as_mut()));
             let header = self.next_packet_header();
-            header.write(&mut empty_packet)?;
-            self.send_packet(empty_packet.freeze())?;
+            header.write(cursor.as_mut().unwrap())?;
+            self.send_packet(packet.take().unwrap())?;
         }
         Ok(())
     }
@@ -241,7 +243,7 @@ impl Packeteer {
     /// "Sending" a packet involves writing a record into the sent buffer,
     /// incrementing the stats counters, and placing the packet into the outbox,
     /// so the consumer code can fetch and dispatch it via whatever means they like.
-    fn send_packet(&mut self, packet: Bytes) -> Result<(), PacketeerError> {
+    fn send_packet(&mut self, packet: BufHandle) -> Result<(), PacketeerError> {
         let send_size = packet.len() + self.config.packet_header_size;
         self.sent_buffer
             .insert(SentData::new(self.time, send_size), self.sequence)?;
@@ -265,9 +267,10 @@ impl Packeteer {
     /// parse out the messages for returning.
     ///
     ///  TODO make this take a &[u8] too?
-    pub fn process_incoming_packet(&mut self, mut packet: Bytes) -> Result<(), PacketeerError> {
+    pub fn process_incoming_packet(&mut self, mut buffer: BufHandle) -> Result<(), PacketeerError> {
         self.counters.packets_received += 1;
-        let header: PacketHeader = PacketHeader::parse(&mut packet)?;
+        let mut reader = Cursor::new(buffer.as_ref());
+        let header: PacketHeader = PacketHeader::parse(&mut reader)?;
         debug!(
             "<<< Receiving packet seq:{} ack:{} ack_bits:{:#0b}",
             header.sequence(),
@@ -287,7 +290,7 @@ impl Packeteer {
             return Err(PacketeerError::DuplicatePacket);
         }
         self.recv_buffer.insert(
-            RecvData::new(self.time, self.config.packet_header_size + packet.len()),
+            RecvData::new(self.time, self.config.packet_header_size + buffer.len()),
             header.sequence(),
         )?;
         // walk the ack bit field, and for any ack not already seen, we inform the dispatcher
@@ -320,8 +323,8 @@ impl Packeteer {
             ack_bits >>= 1;
         }
         // Now extract all the Messages in the packet payload, and hand off to dispatcher
-        while packet.remaining() > 0 {
-            match Message::parse(&self.pool, &mut packet) {
+        while reader.position() < buffer.len() as u64 {
+            match Message::parse(&self.pool, &mut reader) {
                 Ok(msg) => {
                     // info!("Parsed msg: {msg:?}");
                     if let Some(channel) = self.channels.get_mut(msg.channel()) {
@@ -357,8 +360,8 @@ mod tests {
 
         let mut server = Packeteer::default();
         let mut client = Packeteer::default();
-        let payload = Bytes::from_static(b"hello");
-        let _msg_id = server.send_message(0, payload.as_ref());
+        let payload = b"hello";
+        let _msg_id = server.send_message(0, payload);
 
         let to_send = server.drain_packets_to_send().collect::<Vec<_>>();
         assert_eq!(to_send.len(), 1);
@@ -539,12 +542,12 @@ mod tests {
         let write_ack = 100;
         let write_ack_bits = 123;
 
-        let mut buffer = BytesMut::new();
-
+        let mut buffer = Vec::new();
+        let mut cur = Cursor::new(&mut buffer);
         let write_packet = PacketHeader::new(write_sequence, write_ack, write_ack_bits);
-        write_packet.write(&mut buffer).unwrap();
+        write_packet.write(&mut cur).unwrap();
 
-        let mut reader = Bytes::copy_from_slice(buffer.as_ref());
+        let mut reader = Cursor::new(&buffer);
         let read_packet = PacketHeader::parse(&mut reader).unwrap();
 
         assert_eq!(write_packet.sequence(), read_packet.sequence());
