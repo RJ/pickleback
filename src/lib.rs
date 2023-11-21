@@ -5,6 +5,7 @@ use std::{
     collections::{HashMap, VecDeque},
     mem::take,
 };
+mod buffer_pool;
 mod channel;
 mod config;
 mod dispatcher;
@@ -18,6 +19,7 @@ mod sequence_buffer;
 mod test_utils;
 mod tracking;
 
+use buffer_pool::*;
 use channel::*;
 use config::*;
 use dispatcher::*;
@@ -54,6 +56,7 @@ pub struct Packeteer {
     recv_buffer: SequenceBuffer<RecvData>,
     counters: PacketeerStats,
     outbox: VecDeque<Bytes>,
+    pool: BufPool,
 }
 
 impl Default for Packeteer {
@@ -80,6 +83,7 @@ impl Packeteer {
             counters: PacketeerStats::default(),
             outbox: VecDeque::new(),
             channels,
+            pool: BufPool::new(),
         }
     }
 
@@ -133,7 +137,7 @@ impl Packeteer {
     pub fn send_message(&mut self, channel: u8, message_payload: &[u8]) -> MessageId {
         let channel = self.channels.get_mut(channel).expect("No such channel");
         self.dispatcher
-            .add_message_to_channel(channel, message_payload)
+            .add_message_to_channel(&self.pool, channel, message_payload)
     }
 
     fn next_packet_header(&mut self) -> PacketHeader {
@@ -189,8 +193,10 @@ impl Packeteer {
                 while let Some(msg) = channel.get_message_to_write_to_a_packet(remaining_space) {
                     any_found = true;
                     // trace!("* Writing {msg:?} to packet buffer..");
-                    msg.write(packet.as_mut().unwrap())
-                        .expect("writing to a buffer shouldn't fail");
+                    packet.as_mut().unwrap().extend_from_slice(msg.buffer());
+                    // msg.buffer()
+                    // msg.write(packet.as_mut().unwrap())
+                    //     .expect("writing to a buffer shouldn't fail");
                     message_handles_in_packet.push(MessageHandle {
                         id: msg.id(),
                         frag_index: msg.fragment().map(|f| f.index),
@@ -315,7 +321,7 @@ impl Packeteer {
         }
         // Now extract all the Messages in the packet payload, and hand off to dispatcher
         while packet.remaining() > 0 {
-            match Message::parse(&mut packet) {
+            match Message::parse(&self.pool, &mut packet) {
                 Ok(msg) => {
                     // info!("Parsed msg: {msg:?}");
                     if let Some(channel) = self.channels.get_mut(msg.channel()) {
@@ -613,6 +619,7 @@ mod tests {
     #[test]
     fn reject_duplicate_messages() {
         crate::test_utils::init_logger();
+        let pool = BufPool::new();
         let channel = 0;
         let mut harness = TestHarness::new(JitterPipeConfig::disabled());
         let payload = b"hello";
@@ -621,13 +628,13 @@ mod tests {
             .channels_mut()
             .get_mut(channel)
             .unwrap()
-            .enqueue_message(123, payload, Fragmented::No);
+            .enqueue_message(&pool, 123, payload, Fragmented::No);
         harness
             .server
             .channels_mut()
             .get_mut(channel)
             .unwrap()
-            .enqueue_message(123, payload, Fragmented::No);
+            .enqueue_message(&pool, 123, payload, Fragmented::No);
         harness.advance(1.);
         assert_eq!(harness.client.drain_received_messages(channel).len(), 1);
     }
