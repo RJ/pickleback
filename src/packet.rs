@@ -21,10 +21,6 @@
 /// | 4 or 4,5           | `u8` or `u16_le` | sequence_difference, depending on sequnce difference bit in PrefixByte. <br> `sequence` - `last_acked_sequence` |
 /// | 5,6,7,8 or 6,7,8,9 | `u8` x 1-4       | ack bits mask                                                                                                   |
 ///
-///
-///
-///
-///
 use crate::PacketeerError;
 use byteorder::{NetworkEndian, ReadBytesExt, WriteBytesExt};
 use log::*;
