@@ -113,29 +113,22 @@ impl MessageDispatcher {
 
     pub(crate) fn add_message_to_channel(
         &mut self,
+        pool: &BufPool,
         channel: &mut Box<dyn Channel>,
         payload: &[u8],
     ) -> MessageId {
         if payload.len() <= 1024 {
-            self.add_small_message_to_channel(channel, payload)
+            let id = self.next_message_id();
+            channel.enqueue_message(pool, id, payload, Fragmented::No);
+            id
         } else {
-            self.add_large_message_to_channel(channel, payload)
+            self.add_large_message_to_channel(pool, channel, payload)
         }
-    }
-
-    fn add_small_message_to_channel(
-        &mut self,
-        channel: &mut Box<dyn Channel>,
-        payload: &[u8],
-    ) -> MessageId {
-        assert!(payload.len() <= 1024);
-        let id = self.next_message_id();
-        channel.enqueue_message(id, payload, Fragmented::No);
-        id
     }
 
     fn add_large_message_to_channel(
         &mut self,
+        pool: &BufPool,
         channel: &mut Box<dyn Channel>,
         payload: &[u8],
     ) -> MessageId {
@@ -173,7 +166,7 @@ impl MessageDispatcher {
             let start = index as usize * 1024;
             let end = start + payload_size as usize;
             let frag_payload = &payload[start..end];
-            channel.enqueue_message(id, frag_payload, Fragmented::Yes(fragment));
+            channel.enqueue_message(pool, id, frag_payload, Fragmented::Yes(fragment));
         }
         self.sent_frag_map
             .insert_fragmented_message(parent_id, frag_ids);

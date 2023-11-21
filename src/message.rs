@@ -1,3 +1,5 @@
+use std::io::{Cursor, Read, Write};
+
 ///
 /// ### Message header
 ///
@@ -43,7 +45,11 @@
 /// | 2      | `u16`         | Payload Length, only on last fragment_id. Rest are 1024. |
 /// | ..     | Payload       |                                                          |
 ///
-use crate::PacketeerError;
+use crate::{
+    buffer_pool::{BufHandle, BufPool},
+    PacketeerError,
+};
+use byteorder::{NetworkEndian, WriteBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use log::error;
 
@@ -60,26 +66,32 @@ impl Fragment {
     fn is_last(&self) -> bool {
         self.index == self.num_fragments - 1
     }
+    fn header_size(&self, size_mode: MessageSizeMode) -> usize {
+        (match size_mode {
+            MessageSizeMode::Small => 2,
+            MessageSizeMode::Large => 4,
+        }) + if self.is_last() { 2 } else { 0 }
+    }
     pub fn write_header(
         &self,
-        writer: &mut BytesMut,
+        mut writer: impl std::io::Write,
         payload_len: u16,
         size_mode: MessageSizeMode,
     ) -> Result<(), PacketeerError> {
         match size_mode {
             MessageSizeMode::Small => {
-                writer.put_u8(self.index as u8);
-                writer.put_u8(self.num_fragments as u8);
+                writer.write_u8(self.index as u8)?;
+                writer.write_u8(self.num_fragments as u8)?;
             }
             MessageSizeMode::Large => {
-                writer.put_u16(self.index);
-                writer.put_u16(self.num_fragments);
+                writer.write_u16::<NetworkEndian>(self.index)?;
+                writer.write_u16::<NetworkEndian>(self.num_fragments)?;
             }
         }
         // only the last fragment has a payload size. others are 1024.
         if self.is_last() {
             assert!(payload_len <= 1024);
-            writer.put_u16(payload_len);
+            writer.write_u16::<NetworkEndian>(payload_len)?;
         } else {
             // TODO return error here? can we even get corrupted packets off our webrtc transport?
             // do we get checksums for free?
@@ -151,7 +163,7 @@ pub struct Message {
     id: MessageId,
     size_mode: MessageSizeMode,
     channel: u8,
-    payload: Bytes,
+    buffer: BufHandle,
     fragment: Option<Fragment>,
 }
 
@@ -161,15 +173,22 @@ impl std::fmt::Debug for Message {
             f,
             "Message{{id:{}, payload_len:{} fragment:{:?} channel:{}",
             self.id,
-            self.payload.len(),
+            self.buffer.len(),
             self.fragment,
             self.channel,
         )
     }
 }
+// TODO pool holds messages, and they get a builder style api to construct once issued?
 
 impl Message {
-    pub(crate) fn new(id: MessageId, channel: u8, payload: Bytes, fragmented: Fragmented) -> Self {
+    pub(crate) fn new_outbound(
+        pool: &BufPool,
+        id: MessageId,
+        channel: u8,
+        payload: &[u8],
+        fragmented: Fragmented,
+    ) -> Self {
         assert!(channel < 64, "max channel id is 64");
         assert!(payload.len() <= 1024, "max payload size is 1024");
         let size_mode = if payload.len() > 255 {
@@ -177,17 +196,51 @@ impl Message {
         } else {
             MessageSizeMode::Small
         };
+        let header_size = Self::header_size(&fragmented, size_mode);
         let fragment = match fragmented {
             Fragmented::No => None,
             Fragmented::Yes(f) => Some(f),
         };
+        let mut buf = pool.get_buffer(header_size + payload.len());
+        let mut writer = Cursor::new(&mut *buf);
+        Self::write_headers(
+            &mut writer,
+            id,
+            &fragment,
+            size_mode,
+            channel,
+            payload.len(),
+        )
+        .unwrap();
+        writer.write_all(payload).unwrap();
         Self {
             id,
             size_mode,
             channel,
-            payload,
+            buffer: buf,
             fragment,
         }
+    }
+
+    // writes the buffer to the writer
+    pub(crate) fn write(&self, mut writer: impl std::io::Write) -> Result<(), PacketeerError> {
+        writer.write_all(self.buffer())?;
+        Ok(())
+    }
+
+    pub(crate) fn header_size(fragmented: &Fragmented, size_mode: MessageSizeMode) -> usize {
+        // prefix byte
+        1 +
+        if let Fragmented::Yes(frag) = fragmented {
+            frag.header_size(size_mode)
+        } else {
+            match size_mode {
+                MessageSizeMode::Large => 2,
+                MessageSizeMode::Small => 1,
+            }
+        }
+        // message id
+        + 2
     }
 
     pub(crate) fn fragment(&self) -> Option<&Fragment> {
@@ -201,12 +254,12 @@ impl Message {
     pub fn channel(&self) -> u8 {
         self.channel
     }
-    pub fn payload(&self) -> &Bytes {
-        &self.payload
+    pub fn buffer(&self) -> &[u8] {
+        &self.buffer.as_slice()
     }
 
     pub fn size(&self) -> usize {
-        self.payload.len()
+        self.buffer.len()
             + 1
             + match (self.fragment.is_some(), self.size_mode) {
                 // small unfragmented
@@ -235,37 +288,43 @@ impl Message {
     }
 
     // TODO check reminaing and error if writes will panic
-    pub fn write(&self, writer: &mut BytesMut) -> Result<(), PacketeerError> {
+    pub(crate) fn write_headers(
+        mut writer: impl std::io::Write,
+        id: MessageId,
+        fragment: &Option<Fragment>,
+        size_mode: MessageSizeMode,
+        channel: u8,
+        payload_len: usize,
+    ) -> Result<(), PacketeerError> {
         let mut prefix_byte = 0_u8;
-        if self.fragment.is_some() {
+        if fragment.is_some() {
             prefix_byte = 1;
         }
-        if self.size_mode == MessageSizeMode::Large {
+        if size_mode == MessageSizeMode::Large {
             prefix_byte |= 1 << 1;
         }
         // // spare flag
         // if flag_true {
         //     prefix_byte |= 1 << 2;
         // }
-        let channel_mask = self.channel << 3;
+        let channel_mask = channel << 3;
         prefix_byte |= channel_mask;
 
-        writer.put_u8(prefix_byte);
-        writer.put_u16(self.id);
+        writer.write_u8(prefix_byte)?;
+        writer.write_u16::<NetworkEndian>(id)?;
 
-        if let Some(fragment) = self.fragment.as_ref() {
-            fragment.write_header(writer, self.payload.len() as u16, self.size_mode)?;
+        if let Some(fragment) = fragment.as_ref() {
+            fragment.write_header(writer, payload_len as u16, size_mode)?;
         } else {
-            match self.size_mode {
-                MessageSizeMode::Small => writer.put_u8(self.payload.len() as u8),
-                MessageSizeMode::Large => writer.put_u16(self.payload.len() as u16),
+            match size_mode {
+                MessageSizeMode::Small => writer.write_u8(payload_len as u8)?,
+                MessageSizeMode::Large => writer.write_u16::<NetworkEndian>(payload_len as u16)?,
             }
         }
-        writer.extend_from_slice(self.payload.as_ref());
         Ok(())
     }
 
-    pub fn parse(reader: &mut Bytes) -> Result<Self, PacketeerError> {
+    pub fn parse(pool: &BufPool, reader: &mut Bytes) -> Result<Self, PacketeerError> {
         if reader.remaining() < 1 {
             error!("parse message error 1");
             return Err(PacketeerError::InvalidMessage);
@@ -303,16 +362,21 @@ impl Message {
             let (fragment, payload_size) = Fragment::parse_header(reader, size_mode, id)?;
             (Some(fragment), payload_size)
         };
-
         if reader.remaining() < payload_size as usize {
             return Err(PacketeerError::InvalidMessage);
         }
-        let payload = reader.split_to(payload_size as usize);
+        // copy payload from reader into buf
+        let mut buf = pool.get_buffer(payload_size as usize);
+        reader
+            .take(payload_size as usize)
+            .reader()
+            .read_to_end(&mut *buf);
+
         Ok(Self {
             id,
             size_mode,
             channel,
-            payload,
+            buffer: buf,
             fragment,
         })
     }
@@ -320,6 +384,7 @@ impl Message {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     // explicit import to override bevy
     // use log::{debug, error, info, trace, warn};
@@ -327,35 +392,37 @@ mod tests {
     #[test]
     fn message_serialization() {
         crate::test_utils::init_logger();
+        let pool = BufPool::new();
 
-        let payload1 = Bytes::from_static("HELLO".as_bytes());
-        let payload2 = Bytes::from_static("FRAGMENTED".as_bytes());
-        let payload3 = Bytes::from_static("WORLD".as_bytes());
-        let msg1 = Message::new(1, 1, payload1, Fragmented::No);
+        let payload1 = b"HELLO";
+        let payload2 = b"FRAGMENTED";
+        let payload3 = b"WORLD";
+        let msg1 = Message::new_outbound(&pool, 1, 1, payload1, Fragmented::No);
         // the last fragment can be a small msg that rides along with other unfragmented messages:
         let fragment = Fragment {
             index: 0,
             num_fragments: 1,
             parent_id: 1,
         };
-        let msg2 = Message::new(3, 5, payload2, Fragmented::Yes(fragment));
-        let msg3 = Message::new(2, 16, payload3, Fragmented::No);
+        let msg2 = Message::new_outbound(&pool, 3, 5, payload2, Fragmented::Yes(fragment));
+        let msg3 = Message::new_outbound(&pool, 2, 16, payload3, Fragmented::No);
 
-        let mut buffer = BytesMut::with_capacity(1500);
-        msg1.write(&mut buffer).unwrap();
-        msg2.write(&mut buffer).unwrap();
-        msg3.write(&mut buffer).unwrap();
+        let mut buffer = Vec::with_capacity(1500);
 
-        let mut incoming = Bytes::copy_from_slice(&buffer[..]);
+        msg1.buffer().reader().read_to_end(buffer.as_mut()).unwrap();
+        msg2.buffer().reader().read_to_end(buffer.as_mut()).unwrap();
+        msg3.buffer().reader().read_to_end(buffer.as_mut()).unwrap();
 
-        let recv_msg1 = Message::parse(&mut incoming).unwrap();
-        let recv_msg2 = Message::parse(&mut incoming).unwrap();
-        let recv_msg3 = Message::parse(&mut incoming).unwrap();
+        let mut incoming = Bytes::copy_from_slice(buffer.as_slice());
+
+        let recv_msg1 = Message::parse(&pool, &mut incoming).unwrap();
+        let recv_msg2 = Message::parse(&pool, &mut incoming).unwrap();
+        let recv_msg3 = Message::parse(&pool, &mut incoming).unwrap();
 
         assert!(incoming.is_empty());
-        assert_eq!(recv_msg1.payload, msg1.payload);
-        assert_eq!(recv_msg2.payload, msg2.payload);
-        assert_eq!(recv_msg3.payload, msg3.payload);
+        assert_eq!(*recv_msg1.buffer, payload1);
+        assert_eq!(*recv_msg2.buffer, payload2);
+        assert_eq!(*recv_msg3.buffer, payload3);
 
         assert_eq!(recv_msg3.id(), msg3.id());
 
@@ -373,25 +440,28 @@ mod tests {
     #[test]
     fn fragment_message_serialization() {
         crate::test_utils::init_logger();
+        let pool = BufPool::new();
+
         // fragment messages (except the last) have a fixed size of 1024 bytes
-        let payload = Bytes::copy_from_slice(&[41; 1024]);
+        let payload = &[41; 1024];
         let fragment = Fragment {
             index: 0,
             num_fragments: 10,
             parent_id: 1,
         };
-        let msg = Message::new(0, 0, payload, Fragmented::Yes(fragment));
+        let msg = Message::new_outbound(&pool, 0, 0, payload, Fragmented::Yes(fragment));
 
-        let mut buffer = BytesMut::with_capacity(1500);
-        msg.write(&mut buffer).unwrap();
+        let mut buffer = Vec::with_capacity(1500);
+
+        msg.buffer().reader().read_to_end(buffer.as_mut()).unwrap();
 
         let mut incoming = Bytes::copy_from_slice(&buffer[..]);
 
-        let recv_msg = Message::parse(&mut incoming).unwrap();
+        let recv_msg = Message::parse(&pool, &mut incoming).unwrap();
 
         assert!(incoming.is_empty());
 
-        assert_eq!(recv_msg.payload, msg.payload);
+        assert_eq!(*recv_msg.buffer, payload);
         assert!(recv_msg.fragment.is_some());
         assert_eq!(recv_msg.fragment.as_ref().unwrap().index, 0);
         assert_eq!(recv_msg.fragment.as_ref().unwrap().num_fragments, 10);

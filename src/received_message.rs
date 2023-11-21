@@ -49,12 +49,12 @@ impl ReceivedMessage {
     pub fn payload(&self) -> Box<dyn Read + '_> {
         match &self.message_type {
             ReceivedMessageType::Single(message) => {
-                Box::new(Cursor::new(message.payload().as_ref()))
+                Box::new(Cursor::new(message.buffer().as_ref()))
             }
             ReceivedMessageType::Fragmented(v) => {
                 // chain readers together
                 v.iter()
-                    .map(|opt_msg| Cursor::new(opt_msg.as_ref().unwrap().payload().as_ref()))
+                    .map(|opt_msg| Cursor::new(opt_msg.as_ref().unwrap().buffer().as_ref()))
                     .fold(Box::new(empty()) as Box<dyn Read>, |acc, cur| {
                         Box::new(acc.chain(cur))
                     })
