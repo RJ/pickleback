@@ -49,8 +49,7 @@ use crate::{
     buffer_pool::{BufHandle, BufPool},
     PacketeerError,
 };
-use byteorder::{NetworkEndian, WriteBytesExt};
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use byteorder::{NetworkEndian, ReadBytesExt, WriteBytesExt};
 use log::error;
 
 pub type MessageId = u16;
@@ -104,32 +103,19 @@ impl Fragment {
     }
 
     pub fn parse_header(
-        reader: &mut Bytes,
+        reader: &mut Cursor<&Vec<u8>>,
         size_mode: MessageSizeMode,
         id: MessageId,
     ) -> Result<(Self, u16), PacketeerError> {
         let (fragment_id, num_fragments) = match size_mode {
-            MessageSizeMode::Small => {
-                if reader.remaining() < 2 {
-                    error!("parse message error 4");
-                    return Err(PacketeerError::InvalidMessage);
-                }
-                (reader.get_u8() as u16, reader.get_u8() as u16)
-            }
-            MessageSizeMode::Large => {
-                if reader.remaining() < 4 {
-                    error!("parse message error 5");
-                    return Err(PacketeerError::InvalidMessage);
-                }
-                (reader.get_u16(), reader.get_u16())
-            }
+            MessageSizeMode::Small => (reader.read_u8()? as u16, reader.read_u8()? as u16),
+            MessageSizeMode::Large => (
+                reader.read_u16::<NetworkEndian>()?,
+                reader.read_u16::<NetworkEndian>()?,
+            ),
         };
         let payload_size = if fragment_id == num_fragments - 1 {
-            if reader.remaining() < 2 {
-                error!("parse message error 6");
-                return Err(PacketeerError::InvalidMessage);
-            }
-            reader.get_u16()
+            reader.read_u16::<NetworkEndian>()?
         } else {
             1024_u16
         };
@@ -181,7 +167,20 @@ impl std::fmt::Debug for Message {
 }
 // TODO pool holds messages, and they get a builder style api to construct once issued?
 
+// Payloads > 255 bytes need more than a `u8` size prefix
+impl From<usize> for MessageSizeMode {
+    fn from(val: usize) -> Self {
+        if val > 255 {
+            MessageSizeMode::Large
+        } else {
+            MessageSizeMode::Small
+        }
+    }
+}
+
 impl Message {
+    /// Creates a new message, allocates a buffer from the pool, and writes headers and payload to
+    /// the buffer immediately.
     pub(crate) fn new_outbound(
         pool: &BufPool,
         id: MessageId,
@@ -191,11 +190,8 @@ impl Message {
     ) -> Self {
         assert!(channel < 64, "max channel id is 64");
         assert!(payload.len() <= 1024, "max payload size is 1024");
-        let size_mode = if payload.len() > 255 {
-            MessageSizeMode::Large
-        } else {
-            MessageSizeMode::Small
-        };
+
+        let size_mode = payload.len().into();
         let header_size = Self::header_size(&fragmented, size_mode);
         let fragment = match fragmented {
             Fragmented::No => None,
@@ -223,10 +219,10 @@ impl Message {
     }
 
     // writes the buffer to the writer
-    pub(crate) fn write(&self, mut writer: impl std::io::Write) -> Result<(), PacketeerError> {
-        writer.write_all(self.buffer())?;
-        Ok(())
-    }
+    // pub(crate) fn write(&self, mut writer: impl std::io::Write) -> Result<(), PacketeerError> {
+    //     writer.write_all(self.buffer())?;
+    //     Ok(())
+    // }
 
     pub(crate) fn header_size(fragmented: &Fragmented, size_mode: MessageSizeMode) -> usize {
         // prefix byte
@@ -254,8 +250,12 @@ impl Message {
     pub fn channel(&self) -> u8 {
         self.channel
     }
-    pub fn buffer(&self) -> &[u8] {
+    pub fn as_slice(&self) -> &[u8] {
         &self.buffer.as_slice()
+    }
+
+    pub fn buffer(&self) -> &Vec<u8> {
+        &*self.buffer
     }
 
     pub fn size(&self) -> usize {
@@ -324,12 +324,8 @@ impl Message {
         Ok(())
     }
 
-    pub fn parse(pool: &BufPool, reader: &mut Bytes) -> Result<Self, PacketeerError> {
-        if reader.remaining() < 1 {
-            error!("parse message error 1");
-            return Err(PacketeerError::InvalidMessage);
-        }
-        let prefix_byte = reader.get_u8();
+    pub fn parse(pool: &BufPool, reader: &mut Cursor<&Vec<u8>>) -> Result<Self, PacketeerError> {
+        let prefix_byte = reader.read_u8()?;
         let fragmented = prefix_byte & 1 != 0;
         let size_mode = if prefix_byte & (1 << 1) != 0 {
             MessageSizeMode::Large
@@ -337,40 +333,22 @@ impl Message {
             MessageSizeMode::Small
         };
         // let spare_flag = prefix_byte & (1 << 2) != 0
-        let id = reader.get_u16();
+        let id = reader.read_u16::<NetworkEndian>()?;
         let channel = prefix_byte >> 3;
         // TODO refac into MessageHeader which has an opt fragment and does the parsing?
         let (fragment, payload_size) = if !fragmented {
             let payload_size = match size_mode {
-                MessageSizeMode::Small => {
-                    if reader.remaining() < 1 {
-                        error!("parse message error 2");
-                        return Err(PacketeerError::InvalidMessage);
-                    }
-                    reader.get_u8() as u16
-                }
-                MessageSizeMode::Large => {
-                    if reader.remaining() < 2 {
-                        error!("parse message error 3");
-                        return Err(PacketeerError::InvalidMessage);
-                    }
-                    reader.get_u16()
-                }
+                MessageSizeMode::Small => reader.read_u8()? as u16,
+                MessageSizeMode::Large => reader.read_u16::<NetworkEndian>()?,
             };
             (None, payload_size)
         } else {
             let (fragment, payload_size) = Fragment::parse_header(reader, size_mode, id)?;
             (Some(fragment), payload_size)
         };
-        if reader.remaining() < payload_size as usize {
-            return Err(PacketeerError::InvalidMessage);
-        }
         // copy payload from reader into buf
         let mut buf = pool.get_buffer(payload_size as usize);
-        reader
-            .take(payload_size as usize)
-            .reader()
-            .read_to_end(&mut *buf);
+        reader.take(payload_size as u64).read_to_end(&mut *buf);
 
         Ok(Self {
             id,
@@ -408,18 +386,19 @@ mod tests {
         let msg3 = Message::new_outbound(&pool, 2, 16, payload3, Fragmented::No);
 
         let mut buffer = Vec::with_capacity(1500);
+        buffer.extend_from_slice(msg1.as_slice());
+        buffer.extend_from_slice(msg2.as_slice());
+        buffer.extend_from_slice(msg3.as_slice());
 
-        msg1.buffer().reader().read_to_end(buffer.as_mut()).unwrap();
-        msg2.buffer().reader().read_to_end(buffer.as_mut()).unwrap();
-        msg3.buffer().reader().read_to_end(buffer.as_mut()).unwrap();
+        let incoming = Vec::from(buffer.as_slice());
+        let mut cur = Cursor::new(&incoming);
 
-        let mut incoming = Bytes::copy_from_slice(buffer.as_slice());
+        let recv_msg1 = Message::parse(&pool, &mut cur).unwrap();
+        let recv_msg2 = Message::parse(&pool, &mut cur).unwrap();
+        let recv_msg3 = Message::parse(&pool, &mut cur).unwrap();
 
-        let recv_msg1 = Message::parse(&pool, &mut incoming).unwrap();
-        let recv_msg2 = Message::parse(&pool, &mut incoming).unwrap();
-        let recv_msg3 = Message::parse(&pool, &mut incoming).unwrap();
+        assert_eq!(cur.position(), incoming.len() as u64);
 
-        assert!(incoming.is_empty());
         assert_eq!(*recv_msg1.buffer, payload1);
         assert_eq!(*recv_msg2.buffer, payload2);
         assert_eq!(*recv_msg3.buffer, payload3);
@@ -452,14 +431,13 @@ mod tests {
         let msg = Message::new_outbound(&pool, 0, 0, payload, Fragmented::Yes(fragment));
 
         let mut buffer = Vec::with_capacity(1500);
+        buffer.extend_from_slice(msg.as_slice());
 
-        msg.buffer().reader().read_to_end(buffer.as_mut()).unwrap();
-
-        let mut incoming = Bytes::copy_from_slice(&buffer[..]);
+        let mut incoming = Cursor::new(&buffer);
 
         let recv_msg = Message::parse(&pool, &mut incoming).unwrap();
 
-        assert!(incoming.is_empty());
+        assert_eq!(incoming.position(), buffer.len() as u64);
 
         assert_eq!(*recv_msg.buffer, payload);
         assert!(recv_msg.fragment.is_some());

@@ -1,7 +1,7 @@
 #![allow(unused)]
 
 use crate::*;
-use bytes::{BufMut, Bytes, BytesMut};
+// use bytes::{BufMut, Bytes, BytesMut};
 
 pub(crate) fn init_logger() {
     let _ = env_logger::builder()
@@ -10,12 +10,12 @@ pub(crate) fn init_logger() {
         .try_init();
 }
 
-pub(crate) fn random_payload(size: u32) -> Bytes {
-    let mut b = BytesMut::with_capacity(size as usize);
+pub(crate) fn random_payload(size: u32) -> Vec<u8> {
+    let mut b = Vec::with_capacity(size as usize);
     for _ in 0..size {
-        b.put_u8(rand::random::<u8>());
+        b.push(rand::random::<u8>());
     }
-    b.freeze()
+    b
 }
 
 #[derive(Debug)]
@@ -29,14 +29,14 @@ pub(crate) struct TransmissionStats {
 pub(crate) struct TestHarness {
     pub(crate) server: Packeteer,
     pub(crate) client: Packeteer,
-    pub(crate) server_jitter_pipe: JitterPipe<Bytes>,
-    pub(crate) client_jitter_pipe: JitterPipe<Bytes>,
+    pub(crate) server_jitter_pipe: JitterPipe<BufHandle>,
+    pub(crate) client_jitter_pipe: JitterPipe<BufHandle>,
     server_drop_indices: Option<Vec<u32>>,
 }
 impl TestHarness {
     pub(crate) fn new(config: JitterPipeConfig) -> Self {
-        let server_jitter_pipe = JitterPipe::<Bytes>::new(config.clone());
-        let client_jitter_pipe = JitterPipe::<Bytes>::new(config);
+        let server_jitter_pipe = JitterPipe::<BufHandle>::new(config.clone());
+        let client_jitter_pipe = JitterPipe::<BufHandle>::new(config);
         let server = Packeteer::default();
         let client = Packeteer::default();
         Self {
