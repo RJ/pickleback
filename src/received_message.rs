@@ -59,12 +59,11 @@ impl ReceivedMessage {
             }
         }
     }
+    /// Read payload cursor into a new Vec<u8> and return it.
+    ///
     /// This is for unit tests
     pub fn payload_to_owned(&self) -> Vec<u8> {
         let mut ret = Vec::with_capacity(self.payload_len());
-        // self.payload()
-        //     .read_exact(&mut ret.as_mut())
-        //     .expect("couldn't ready payload");
 
         self.payload()
             .read_to_end(&mut ret)

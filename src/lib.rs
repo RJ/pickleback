@@ -127,6 +127,7 @@ impl Packeteer {
             message_payload.len() <= self.config.max_message_size,
             "config.max_message_size exceeded"
         );
+        self.stats.message_sends += 1;
         let channel = self.channels.get_mut(channel).expect("No such channel");
         self.dispatcher
             .add_message_to_channel(&self.pool, channel, message_payload)
@@ -175,13 +176,17 @@ impl Packeteer {
             }
 
             while let Some(channel) = self.channels.all_non_empty_mut().next() {
-                if !Self::write_channel_messages_to_packet(
+                match Self::write_channel_messages_to_packet(
                     channel.as_mut(),
                     writer.as_mut().unwrap(),
                     &mut message_handles_in_packet,
                 )? {
-                    break;
+                    0 => break,
+                    num_written => {
+                        self.stats.message_sends += num_written as u64;
+                    }
                 }
+
                 if writer.as_ref().unwrap().remaining() < 3 {
                     break;
                 }
@@ -207,15 +212,15 @@ impl Packeteer {
     /// Writes messages from the channel into the packet cursor, until there's no space left,
     /// or the channel runs out of messages to send.
     ///
-    /// Returns true if it wrote anything at all
+    /// Returns number of messages written.
     fn write_channel_messages_to_packet(
         channel: &mut dyn Channel,
         cursor: &mut BufferLimitedWriter,
         message_handles: &mut Vec<MessageHandle>,
-    ) -> Result<bool, PacketeerError> {
-        let mut any_found = false;
+    ) -> Result<usize, PacketeerError> {
+        let mut num_written = 0;
         while let Some(msg) = channel.get_message_to_write_to_a_packet(cursor.remaining()) {
-            any_found = true;
+            num_written += 1;
             cursor.write_all(msg.as_slice())?;
             message_handles.push(MessageHandle {
                 id: msg.id(),
@@ -226,7 +231,7 @@ impl Packeteer {
                 break;
             }
         }
-        Ok(any_found)
+        Ok(num_written)
     }
 
     /// Sends a packet containing zero messages.
@@ -314,6 +319,7 @@ impl Packeteer {
         while reader.remaining() > 0 {
             // as long as there are bytes left to read, we should only find whole messages
             let msg = Message::parse(&self.pool, reader)?;
+            self.stats.messages_received += 1;
             if let Some(channel) = self.channels.get_mut(msg.channel()) {
                 if channel.accepts_message(&msg) {
                     self.dispatcher.process_received_message(msg);
