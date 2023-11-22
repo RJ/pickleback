@@ -1,3 +1,38 @@
+#![warn(missing_docs)]
+//! # Packeteer
+//!
+//! A way to multiplex and coalesce messages over an unreliable stream of datagrams, for game netcode.
+//!
+//! Typically you hook this up to UDP sockets.
+//!
+//! ## Features
+//!
+//! * Coalesces multiple small messages into packets
+//! * Transparently fragments & reassembles messages too large for one packet
+//! * Multiple virtual channels for sending/receiving messages
+//! * Optionally reliable channels, with configurable resending behaviour
+//! * Sending a messages gives you a handle, to use for checking packet acks
+//! * Internal pool of buffers for messages and packets, to minimise allocations
+//! * No async: designed to integrate into your existing game loop. Call it each tick.
+//! * Unit tests and integration / soak tests with bad-link simulator that drops, dupes, & reorders packets.
+//! * Calculates rtt
+//!
+//! ## TODO
+//! * Calculate packet loss estimate
+//! * Bandwidth tracking and budgeting
+//! * Allow configuration of channels and channel settings (1 reliable, 1 unreliable only atm)
+//! * Ordering of channels for selecting messages to send
+//! * Example using bevy and an unreliable transport mechanism.
+//! * Perhaps offer a bincoded channel of things that `impl Serialize`.
+//! * Seek feedback on design and public API.
+//! * Benchmark with and without pooled buffers.
+//! * Do we want to issue buffers for initial writing by consumers, assuming they know the size,
+//!   or are we content with copying from their temporary buffer to our pooled buffers?
+//!
+//!
+//! ### Provenance
+//! * [Gaffer articles](https://gafferongames.com/post/reliable_ordered_messages/) (building network protocol, packet acking, seq bufferer, messages, etc)
+//! * [netcode.io rust code](https://github.com/jaynus/netcode.io/tree/master) (sequence buffer, packet header and acking code)
 use cursor::{BufferLimitedWriter, CursorExtras};
 ///
 use log::*;
@@ -33,6 +68,7 @@ use received_message::*;
 use sequence_buffer::*;
 use tracking::*;
 
+/// Easy importing of all the important bits
 pub mod prelude {
     pub use super::config::PacketeerConfig;
     pub use super::error::PacketeerError;
@@ -46,6 +82,7 @@ pub mod prelude {
 #[derive(Debug, Eq, PartialEq, Hash)]
 pub struct SentHandle(u16);
 
+/// An instance of Packeteer represents one of the two endpoints at either side of a link
 pub struct Packeteer {
     time: f64,
     rtt: f32,
@@ -116,7 +153,7 @@ impl Packeteer {
 
     /// Drains the list of acked message ids.
     ///
-    /// Once your `MessageId` acked, it means we received a packet back from the remote endpoint
+    /// Once your `MessageId` is acked, it means we received a packet back from the remote endpoint
     /// saying that message ID was received.
     ///
     /// (In fact, acks happen at a packet level, not a message level – and then packet acks are
@@ -267,7 +304,7 @@ impl Packeteer {
     /// Advance the time by `dt` seconds.
     ///
     /// When ticking in your game loop, you must advance the time within Packeteer too, by passing
-    /// in the delta time since you last called update,
+    /// in the delta time since you last called update.
     ///
     /// This is so it knows when to schedule re-sends of data, and can calculate rtt correctly.
     pub fn update(&mut self, dt: f64) {

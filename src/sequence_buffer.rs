@@ -76,7 +76,7 @@ where
                 "{} Sequence too old to insert: {sequence}",
                 self.type_name()
             );
-            return Err(PacketeerError::SequenceBufferFull);
+            return Err(PacketeerError::SequenceTooOld);
         }
         // log::info!("{} Inserting {sequence}..", self.type_name());
         // are we inserting with a gap in the range? ie new sequence we are inserting at
