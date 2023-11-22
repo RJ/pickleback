@@ -1,18 +1,22 @@
-// a queue that can reorder, drop, and duplicate packets, like sending udp packets over the internet.
-// not testing packet modification; assuming there are checksums so mangled packets manifest as drops.
+//! Jitterpipe is a queue that can reorder, drop, and duplicate packets, just like sending udp packets over the internet.
+//!
+//! Packets are assigned a float sort key upon insert, based off a counter that increments +1.0
+//! for each packet sent. Jitter modifies the sort key by +/- . So Jitter under 0.5 will never
+//! cause packets to reorder, since packets with keys 1,2 with jitter of 0.4 will at worse become:
+//! 1.4, 1.6 but worst case jitter of 0.6 could be: 1.6, 1.4 which would cause a reorder.
 use std::{cmp::Ordering, collections::BinaryHeap};
 
-/// Packets are assigned a float sort key upon insert, based off a counter that increments +1.0
-/// for each packet sent. Jitter modifies the sort key by +/- . So Jitter under 0.5 will never
-/// cause packets to reorder, since packets with keys 1,2 with jitter of 0.4 will at worse become:
-/// 1.4, 1.6 but worst case jitter of 0.6 could be: 1.6, 1.4 which would cause a reorder.
+/// Config settings for JitterPipe, to simulate imperfect network connections
 #[derive(Clone)]
 pub struct JitterPipeConfig {
+    /// If not enabled, all other settings are ignored and pipe is treated like a perfect queue
     pub enabled: bool,
+    /// Chance of dropping a packet, 0-1
     pub drop_chance: f32,
+    /// Chance of duplicating a packet, 0-1 (ie, delivering same packet twice)
     pub duplicate_chance: f32,
-    // any jitter less than 0.5 will not cause reordering.
-    // need to expose this setting in a scaled, more useful way somehow.
+    /// A random amount of jitter, up to `max_jitter`, is added or removed from each packet.
+    /// Any jitter less than 0.5 will not cause reordering.
     pub max_jitter: f32,
 }
 
@@ -28,6 +32,7 @@ impl Default for JitterPipeConfig {
 }
 
 impl JitterPipeConfig {
+    /// Pretty bad, but not terrible.
     pub fn bad() -> Self {
         Self {
             enabled: true,
@@ -36,7 +41,7 @@ impl JitterPipeConfig {
             max_jitter: 2.0,
         }
     }
-
+    /// Insert shittiest-ISP pun here
     pub fn terrible() -> Self {
         Self {
             enabled: true,
@@ -46,6 +51,7 @@ impl JitterPipeConfig {
         }
     }
 
+    /// JitterPipe acts like a perfect queue
     #[allow(unused)]
     pub fn disabled() -> Self {
         Self {

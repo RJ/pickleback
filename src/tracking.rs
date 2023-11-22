@@ -51,17 +51,25 @@ impl Default for RecvData {
     }
 }
 
+/// Stats object
 #[derive(Default, Debug, Clone)]
 pub struct PacketeerStats {
+    /// Number of packets sent
     pub packets_sent: u64,
+    /// Number of packets received
     pub packets_received: u64,
+    /// Number of packets acked
     pub packets_acked: u64,
+    /// Number of stale packets received (and discarded)
     pub packets_stale: u64,
+    /// Number of duplicate packets received (and discarded)
     pub packets_duplicate: u64,
-    /// number of calls to send_message. Some of which will result in multiple fragmented
-    /// messages being sent.
+    /// Number of calls to send_message.
+    /// (Some of which will result in multiple fragmented messages being sent)
     pub message_sends: u64,
-    /// actual number of messages sent in packets. Some of which will be fragments for larger messages.
+    /// Actual number of messages sent in packets.
+    /// (Some of which will be fragments for larger messages)
     pub messages_sent: u64,
+    /// Number of messages received.
     pub messages_received: u64,
 }

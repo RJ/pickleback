@@ -1,30 +1,32 @@
+/// Packeteer specific errors
 #[derive(Debug)]
 pub enum PacketeerError {
+    /// A wrapped io:Error
     Io(std::io::Error),
-    ExceededMaxPacketSize,
-    SequenceBufferFull,
-    // SequenceTooOld,
-    PacketTooSmall,
+    /// Tried to insert into a sequence buffer, but sequence is too old for buffer
+    SequenceTooOld,
+    /// Parsing packet format error
     InvalidPacket,
+    /// Packet arrived too late to be useful
     StalePacket,
+    /// Already received this packet
     DuplicatePacket,
+    /// Parsing message format error
     InvalidMessage,
 }
 
 impl std::fmt::Display for PacketeerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "invalid first item to double")
+        write!(f, "{self:?}")
     }
 }
 
-// This is important for other errors to wrap this one.
 impl std::error::Error for PacketeerError {
-    fn description(&self) -> &str {
-        "invalid first item to double"
-    }
-
-    fn cause(&self) -> Option<&dyn std::error::Error> {
-        None
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(err) => Some(err),
+            _ => None,
+        }
     }
 }
 
