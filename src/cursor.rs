@@ -1,6 +1,52 @@
-// This can be deleted once rust's #![feature(cursor_remaining)] is stable.
 use std::io::Cursor;
+use std::io::{self, Write};
 
+pub(crate) type BufferLimitedWriter<'a> = WriteLimiter<Cursor<&'a mut Vec<u8>>>;
+
+pub(crate) struct WriteLimiter<W: Write> {
+    writer: W,
+    limit: usize,
+    written: usize,
+}
+
+impl<W: Write> WriteLimiter<W> {
+    pub fn new(writer: W, limit: usize) -> Self {
+        WriteLimiter {
+            writer,
+            limit,
+            written: 0,
+        }
+    }
+
+    pub fn remaining(&self) -> usize {
+        self.limit.saturating_sub(self.written)
+    }
+}
+
+impl<W: Write> Write for WriteLimiter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if self.written >= self.limit {
+            return Ok(0);
+        }
+
+        let allowed_to_write = self.limit - self.written;
+        let to_write = std::cmp::min(allowed_to_write, buf.len());
+
+        match self.writer.write(&buf[..to_write]) {
+            Ok(bytes_written) => {
+                self.written += bytes_written;
+                Ok(bytes_written)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.writer.flush()
+    }
+}
+
+// This can be deleted once rust's #![feature(cursor_remaining)] is stable.
 pub(crate) trait CursorExtras {
     fn remaining(&self) -> u64;
     fn remaining_slice(&self) -> &[u8];

@@ -1,9 +1,9 @@
+use cursor::{BufferLimitedWriter, CursorExtras};
 ///
 use log::*;
 use std::{
     collections::{HashMap, VecDeque},
     io::{Cursor, Write},
-    mem::take,
 };
 mod buffer_pool;
 mod channel;
@@ -125,16 +125,17 @@ impl Packeteer {
         self.sent_buffer.get(sent_handle.0)
     }
 
+    /// Drains the list of received messages
     pub fn drain_received_messages(&mut self, channel: u8) -> std::vec::Drain<'_, ReceivedMessage> {
         self.dispatcher.drain_received_messages(channel)
     }
 
+    /// Drains the list of acked message ids
     pub fn drain_message_acks(&mut self, channel: u8) -> std::vec::Drain<'_, MessageId> {
         self.dispatcher.drain_message_acks(channel)
     }
 
-    /// enqueue a message to be sent in a packet.
-    /// messages get coalesced into packets.
+    /// Enqueue a message to be sent in the next available packet, via a channel.
     pub fn send_message(&mut self, channel: u8, message_payload: &[u8]) -> MessageId {
         let channel = self.channels.get_mut(channel).expect("No such channel");
         self.dispatcher
@@ -144,95 +145,107 @@ impl Packeteer {
     fn next_packet_header(&mut self) -> PacketHeader {
         self.sequence = self.sequence.wrapping_add(1);
         let sequence = self.sequence;
-
         let (ack, ack_bits) = self.recv_buffer.ack_bits();
+        PacketHeader::new(sequence, ack, ack_bits)
+    }
 
-        let header = PacketHeader::new(sequence, ack, ack_bits);
-
+    fn write_packet_header(&mut self, cursor: &mut impl Write) -> Result<usize, PacketeerError> {
+        let header = self.next_packet_header();
         debug!(
             ">>> Sending packet seq:{} ack:{} ack_bits:{:#0b}",
             header.sequence(),
             header.ack(),
             header.ack_bits()
         );
-        header
+        header.write(cursor)?;
+        Ok(header.size())
     }
 
+    /// For all the channels, coalesce any outbound messages they have into packets, with
+    /// packet headers written. Place into outbox for eventual sending over the network.
+    ///
+    /// A "packet" is a buffer sized at the max_packet_size, which is approx. 1200 bytes.
     fn write_packets_to_send(&mut self) -> Result<(), PacketeerError> {
-        // info!("write packets.");
         let mut sent_something = false;
-
-        let mut message_handles_in_packet = Vec::<MessageHandle>::new();
+        let mut message_handles_in_packet = Vec::new();
         let max_packet_size = self.config.max_packet_size;
-
-        // let mut packet: Option<BytesMut> = None;
         let mut packet: Option<BufHandle> = None;
-        let mut cursor: Option<Cursor<&mut Vec<u8>>> = None;
-        let mut remaining_space = max_packet_size;
+        // BufferLimitedWriter (which impls Write) wraps up `Cursor<&mut Vec<u8>>>` but limits how
+        // many bytes can be written, and provides a .remaining() fn to query same.
+        let mut writer: Option<BufferLimitedWriter> = None;
 
-        // definitely scope to optimise these nested loops..
-        // hopefully never sending too many packets per tick though, so maybe fine.
         while self.channels.any_with_messages_to_send() {
-            if cursor.is_none() {
-                packet = Some(self.pool.get_buffer(1300));
-                cursor = Some(Cursor::new(packet.as_mut().unwrap().as_mut()));
-
-                let header = self.next_packet_header();
-
-                header.write(cursor.as_mut().unwrap())?;
-                remaining_space = max_packet_size - header.size();
+            if writer.is_none() {
+                packet = Some(self.pool.get_buffer(max_packet_size));
+                let cur = Cursor::new(packet.as_mut().unwrap().as_mut());
+                writer = Some(BufferLimitedWriter::new(cur, max_packet_size));
+                self.write_packet_header(writer.as_mut().unwrap())?;
             }
 
-            // info!("any with msg to send");
-            // for all channels with messages to send:
-            'non_empty_channels: while let Some(channel) = self.channels.all_non_empty_mut().next()
-            {
-                let mut any_found = false;
-                while let Some(msg) = channel.get_message_to_write_to_a_packet(remaining_space) {
-                    any_found = true;
-                    // trace!("* Writing {msg:?} to packet buffer..");
-                    cursor.as_mut().unwrap().write_all(msg.as_slice())?;
-
-                    message_handles_in_packet.push(MessageHandle {
-                        id: msg.id(),
-                        frag_index: msg.fragment().map(|f| f.index),
-                        channel: channel.id(),
-                    });
-                    remaining_space =
-                        max_packet_size - cursor.as_ref().unwrap().position() as usize;
-                    if remaining_space < 3 {
-                        break 'non_empty_channels;
-                    }
+            while let Some(channel) = self.channels.all_non_empty_mut().next() {
+                if !Self::write_channel_messages_to_packet(
+                    channel.as_mut(),
+                    writer.as_mut().unwrap(),
+                    &mut message_handles_in_packet,
+                )? {
+                    break;
                 }
-                if !any_found {
+                if writer.as_ref().unwrap().remaining() < 3 {
                     break;
                 }
             }
-            if remaining_space == max_packet_size {
-                continue;
+
+            if writer.as_ref().unwrap().remaining() != max_packet_size {
+                sent_something = true;
+                writer = None;
+                self.send_packet(packet.take().unwrap())?;
+                self.dispatcher.set_packet_message_handles(
+                    SentHandle(self.sequence),
+                    std::mem::take(&mut message_handles_in_packet),
+                )?;
             }
-            sent_something = true;
-            cursor = None;
-            self.send_packet(packet.take().unwrap())?;
-            // track which message ids are in which packet handle, so that when a packet handle
-            // is acked, we can ack the corresponding message ids
-            self.dispatcher.set_packet_message_handles(
-                SentHandle(self.sequence),
-                take(&mut message_handles_in_packet),
-            )?;
         }
 
-        // if no Messages to send, we'll still send an empty-payload packet, so that
-        // acks are transmitted.
-        // sending one empty packet per tick is fine.. right? what about uncapped headless server?
         if !sent_something {
-            packet = Some(self.pool.get_buffer(1300));
-            cursor = Some(Cursor::new(packet.as_mut().unwrap().as_mut()));
-            let header = self.next_packet_header();
-            header.write(cursor.as_mut().unwrap())?;
-            self.send_packet(packet.take().unwrap())?;
+            self.send_empty_packet()?;
         }
         Ok(())
+    }
+
+    /// Writes messages from the channel into the packet cursor, until there's no space left,
+    /// or the channel runs out of messages to send.
+    ///
+    /// Returns true if it wrote anything at all
+    fn write_channel_messages_to_packet(
+        channel: &mut dyn Channel,
+        cursor: &mut BufferLimitedWriter,
+        message_handles: &mut Vec<MessageHandle>,
+    ) -> Result<bool, PacketeerError> {
+        let mut any_found = false;
+        while let Some(msg) = channel.get_message_to_write_to_a_packet(cursor.remaining()) {
+            any_found = true;
+            cursor.write_all(msg.as_slice())?;
+            message_handles.push(MessageHandle {
+                id: msg.id(),
+                frag_index: msg.fragment().map(|f| f.index),
+                channel: channel.id(),
+            });
+            if cursor.remaining() < 3 {
+                break;
+            }
+        }
+        Ok(any_found)
+    }
+
+    /// Enqueues a packet containing zero messages.
+    ///
+    /// The packet  header contains the ack field, so it can be useful to send an empty packet
+    /// just to send acks. We do this if there are no messages to send this tick.
+    fn send_empty_packet(&mut self) -> Result<(), PacketeerError> {
+        let mut packet = Some(self.pool.get_buffer(1300));
+        let mut cursor = Cursor::new(packet.as_mut().unwrap().as_mut());
+        self.write_packet_header(&mut cursor)?;
+        self.send_packet(packet.take().unwrap())
     }
 
     /// "Sending" a packet involves writing a record into the sent buffer,
@@ -247,6 +260,12 @@ impl Packeteer {
         Ok(())
     }
 
+    /// Advance the time by `dt` seconds.
+    ///
+    /// When ticking in your game loop, you must advance the time within Packeteer too, by passing
+    /// in the delta time since you last called update,
+    ///
+    /// This is so it knows when to schedule re-sends of data, and can calculate rtt correctly.
     pub fn update(&mut self, dt: f64) {
         self.time += dt;
         // updating time for channels may result in reliable channels enqueuing messages
@@ -256,12 +275,10 @@ impl Packeteer {
         }
     }
 
-    /// Called by consumer with a packet they just read of the network.
+    /// Parse a received packet, reading the header and all messages contained within.
     ///
-    /// Will parse packet headers, deliver message acks to dispatcher, and
-    /// parse out the messages for returning.
-    ///
-    ///  TODO make this take a &[u8] too?
+    /// Called by consumer with a packet they just read from the network.
+    /// Extracted messages are delivered to channels, acks are extracted for later consumption.
     pub fn process_incoming_packet(&mut self, buffer: BufHandle) -> Result<(), PacketeerError> {
         self.counters.packets_received += 1;
         let mut reader = Cursor::new(buffer.as_ref());
@@ -288,10 +305,38 @@ impl Packeteer {
             RecvData::new(self.time, self.config.packet_header_size + buffer.len()),
             header.sequence(),
         )?;
+        self.process_packet_acks_and_rtt(&header);
+        self.process_packet_messages(&mut reader)?;
+
+        Ok(())
+    }
+
+    /// Parses Messages from packet payload and delivers them to the dispatcher
+    fn process_packet_messages(
+        &mut self,
+        reader: &mut Cursor<&Vec<u8>>,
+    ) -> Result<(), PacketeerError> {
+        while reader.remaining() > 0 {
+            // as long as there are bytes left to read, we should only find whole messages
+            let msg = Message::parse(&self.pool, reader)?;
+            if let Some(channel) = self.channels.get_mut(msg.channel()) {
+                if channel.accepts_message(&msg) {
+                    self.dispatcher.process_received_message(msg);
+                } else {
+                    warn!("Channel rejects message id {msg:?}");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Parses ack bitfield and checks for unseen acks, reports them to the dispatcher so it can
+    /// ack the message ids associated with the packet sequence nunmber.
+    /// Updates rtt calculations.
+    fn process_packet_acks_and_rtt(&mut self, header: &PacketHeader) {
         // walk the ack bit field, and for any ack not already seen, we inform the dispatcher
         // so that it can ack all messages associated with that packet sequence number.
         let mut ack_bits = header.ack_bits();
-        // create ack field for last 32 msgs
         for i in 0..32 {
             if ack_bits & 1 != 0 {
                 let ack_sequence = header.ack().wrapping_sub(i);
@@ -317,26 +362,6 @@ impl Packeteer {
             }
             ack_bits >>= 1;
         }
-        // Now extract all the Messages in the packet payload, and hand off to dispatcher
-        while reader.position() < buffer.len() as u64 {
-            match Message::parse(&self.pool, &mut reader) {
-                Ok(msg) => {
-                    // info!("Parsed msg: {msg:?}");
-                    if let Some(channel) = self.channels.get_mut(msg.channel()) {
-                        if channel.accepts_message(&msg) {
-                            self.dispatcher.process_received_message(msg);
-                        } else {
-                            warn!("Channel rejects message id {msg:?}");
-                        }
-                    }
-                }
-                Err(err) => {
-                    error!("Error parsing messages from packet payload: {err:?}");
-                    break;
-                }
-            }
-        }
-        Ok(())
     }
 }
 

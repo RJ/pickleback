@@ -24,7 +24,10 @@
 use crate::PacketeerError;
 use byteorder::{NetworkEndian, ReadBytesExt, WriteBytesExt};
 use log::*;
-use std::{io::Cursor, num::Wrapping};
+use std::{
+    io::{Cursor, Write},
+    num::Wrapping,
+};
 
 #[derive(Clone, PartialEq, PartialOrd, Debug, Default)]
 pub struct PacketHeader {
@@ -88,7 +91,7 @@ impl PacketHeader {
     }
 
     // max of 9 bytes?
-    pub fn write(&self, writer: &mut Cursor<&mut Vec<u8>>) -> Result<(), PacketeerError> {
+    pub fn write(&self, writer: &mut impl Write) -> Result<(), PacketeerError> {
         // if writer.remaining_mut() < 9 {
         //     panic!("::write given too-small BytesMut");
         // }

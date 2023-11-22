@@ -1,11 +1,37 @@
 # Packeteer
 
+ TODO:
+
+* figure out sizes of various SeuqnceBuffers and add to config.
+* review packet/message parsing code for unwraps/potential crashes.
+* improve logic in packet coalescing function
+* discuss api with discord: is send_message ok? you have to write your msg to a tmp buffer,
+  then packeteer copies it to a pooled buffer,
+* could offer an option to grab a pooled buffer and write to that, if you know the size of msg?
+
+
 **A protocol layer for unreliable datagram exchange**
 
 * One instance of `Packeteer` sits at each end of an unreliable datagram channel between two peers.
 * `Packeteer` doesn't handle networking, has no concept of sockets or network addresses or client ids.
 * A gameserver might have a `HashMap<ClientId, Packeteer>`, and a client would have a single `Packeteer` instance.
 * You need to manage sockets/transports/`SocketAddr` yourself and marshal packets with the correct `Packeteer` instance.
+
+### Deets
+
+* The unit of transmission in Packeteer is the `Message` - it can be between 1 byte and 1 MB.
+* Multiple messages are coalesced into packets for transmission.
+* Messages will be automatically fragmented over multiple packets if they exceed 1024 bytes.
+* Sending large messages over an unreliable channel means if any single fragment is lost,
+  the entire message is lost.
+* When you send a message (ie, provide the `&[u8]` payload) you get a `MessageId` – you can check if the
+  `MessageId` has been acked later.
+
+### Allocations and Memory Management
+
+Currently Packeteer has a pool of reusable `Vec<u8>` with varying capacities.
+When you send a message, 
+
 
 
 
