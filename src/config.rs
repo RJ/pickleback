@@ -1,6 +1,6 @@
 #[derive(Clone)]
 pub struct PacketeerConfig {
-    pub max_payload_size: usize,
+    pub max_message_size: usize,
     pub max_packet_size: usize,
     pub sent_packets_buffer_size: usize,
     pub received_packets_buffer_size: usize,
@@ -13,7 +13,7 @@ pub struct PacketeerConfig {
 impl Default for PacketeerConfig {
     fn default() -> Self {
         Self {
-            max_payload_size: 1024,
+            max_message_size: 1024 * 1024,
             max_packet_size: 1150,
             sent_packets_buffer_size: 256,
             received_packets_buffer_size: 256,

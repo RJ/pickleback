@@ -58,7 +58,7 @@ pub struct PacketeerStats {
     pub packets_acked: u64,
     pub packets_stale: u64,
     pub packets_duplicate: u64,
-    pub packets_invalid: u64,
-    pub packets_too_large_to_send: u64,
-    pub packets_too_large_to_receive: u64,
+    // pub packets_invalid: u64,
+    // pub packets_too_large_to_send: u64,
+    // pub packets_too_large_to_receive: u64,
 }
