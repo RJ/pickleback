@@ -1,4 +1,4 @@
-#![warn(missing_docs)]
+#![warn(missing_docs, clippy::missing_errors_doc, clippy::missing_panics_doc)]
 //! # Packeteer
 //!
 //! A way to multiplex and coalesce messages over an unreliable stream of datagrams, for game netcode.
