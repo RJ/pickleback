@@ -42,8 +42,6 @@ pub mod prelude {
     pub use super::Packeteer;
 }
 
-pub const MAX_MESSAGE_LEN: usize = 1024 * 1024;
-
 /// returned from send - contains packet seqno
 #[derive(Debug, Eq, PartialEq, Hash)]
 pub struct SentHandle(u16);
@@ -57,7 +55,7 @@ pub struct Packeteer {
     channels: ChannelList,
     sent_buffer: SequenceBuffer<SentData>,
     recv_buffer: SequenceBuffer<RecvData>,
-    counters: PacketeerStats,
+    stats: PacketeerStats,
     outbox: VecDeque<BufHandle>,
     pool: BufPool,
 }
@@ -83,20 +81,22 @@ impl Packeteer {
             sent_buffer: SequenceBuffer::with_capacity(config.sent_packets_buffer_size),
             recv_buffer: SequenceBuffer::with_capacity(config.received_packets_buffer_size),
             dispatcher: MessageDispatcher::default(),
-            counters: PacketeerStats::default(),
+            stats: PacketeerStats::default(),
             outbox: VecDeque::new(),
             channels,
             pool: BufPool::default(),
         }
     }
 
-    // used by tests
-    #[allow(dead_code)]
-    pub(crate) fn channels_mut(&mut self) -> &mut ChannelList {
-        &mut self.channels
+    /// Returns `PacketeerStats`, which tracks metrics on packet and message counts, etc.
+    #[allow(unused)]
+    pub fn stats(&self) -> &PacketeerStats {
+        &self.stats
     }
 
-    /// draining iterator over packets in the outbox that we need to send over the network
+    /// Draining iterator over packets in the outbox that we need to send over the network.
+    ///
+    /// Call this and send packets to the other Packeteer endpoint via a network transport.
     pub fn drain_packets_to_send(&mut self) -> std::collections::vec_deque::Drain<'_, BufHandle> {
         match self.write_packets_to_send() {
             Ok(..) => {}
@@ -104,44 +104,35 @@ impl Packeteer {
         }
         self.outbox.drain(..)
     }
-    // used by tests
-    #[allow(dead_code)]
-    pub fn has_packets_to_send(&self) -> bool {
-        !self.outbox.is_empty()
-    }
 
-    #[allow(unused)]
-    pub fn config(&self) -> &PacketeerConfig {
-        &self.config
-    }
-
-    #[allow(unused)]
-    pub fn counters(&self) -> &PacketeerStats {
-        &self.counters
-    }
-
-    #[allow(unused)]
-    pub(crate) fn sent_info(&self, sent_handle: SentHandle) -> Option<&SentData> {
-        self.sent_buffer.get(sent_handle.0)
-    }
-
-    /// Drains the list of received messages
+    /// Drains the list of received messages, which were parsed from received packets.
     pub fn drain_received_messages(&mut self, channel: u8) -> std::vec::Drain<'_, ReceivedMessage> {
         self.dispatcher.drain_received_messages(channel)
     }
 
-    /// Drains the list of acked message ids
+    /// Drains the list of acked message ids.
+    ///
+    /// Once your `MessageId` acked, it means we received a packet back from the remote endpoint
+    /// saying that message ID was received.
+    ///
+    /// (In fact, acks happen at a packet level, not a message level – and then packet acks are
+    /// translated onto message acks.)
     pub fn drain_message_acks(&mut self, channel: u8) -> std::vec::Drain<'_, MessageId> {
         self.dispatcher.drain_message_acks(channel)
     }
 
     /// Enqueue a message to be sent in the next available packet, via a channel.
     pub fn send_message(&mut self, channel: u8, message_payload: &[u8]) -> MessageId {
+        assert!(
+            message_payload.len() <= self.config.max_message_size,
+            "config.max_message_size exceeded"
+        );
         let channel = self.channels.get_mut(channel).expect("No such channel");
         self.dispatcher
             .add_message_to_channel(&self.pool, channel, message_payload)
     }
 
+    /// Creates a PacketHeader using the next packet sequence number, and an ack-field of recent acks.
     fn next_packet_header(&mut self) -> PacketHeader {
         self.sequence = self.sequence.wrapping_add(1);
         let sequence = self.sequence;
@@ -149,6 +140,7 @@ impl Packeteer {
         PacketHeader::new(sequence, ack, ack_bits)
     }
 
+    /// Calls `next_packet_header()` and writes it to the provided cursor, returning the bytes written
     fn write_packet_header(&mut self, cursor: &mut impl Write) -> Result<usize, PacketeerError> {
         let header = self.next_packet_header();
         debug!(
@@ -237,7 +229,7 @@ impl Packeteer {
         Ok(any_found)
     }
 
-    /// Enqueues a packet containing zero messages.
+    /// Sends a packet containing zero messages.
     ///
     /// The packet  header contains the ack field, so it can be useful to send an empty packet
     /// just to send acks. We do this if there are no messages to send this tick.
@@ -248,15 +240,18 @@ impl Packeteer {
         self.send_packet(packet.take().unwrap())
     }
 
-    /// "Sending" a packet involves writing a record into the sent buffer,
-    /// incrementing the stats counters, and placing the packet into the outbox,
-    /// so the consumer code can fetch and dispatch it via whatever means they like.
+    /// "Send" a fully formed packet, by writing a record into the sent buffer,
+    /// incrementing the stats counters, and placing the packet into the outbox
+    ///
+    /// The BufHandle is for a packet with headers written, usually in `write_packets_to_send()`.
+    ///
+    /// The consumer code should fetch and dispatch it via whatever means they like.
     fn send_packet(&mut self, packet: BufHandle) -> Result<(), PacketeerError> {
         let send_size = packet.len() + self.config.packet_header_size;
         self.sent_buffer
             .insert(SentData::new(self.time, send_size), self.sequence)?;
         self.outbox.push_back(packet);
-        self.counters.packets_sent += 1;
+        self.stats.packets_sent += 1;
         Ok(())
     }
 
@@ -280,10 +275,10 @@ impl Packeteer {
     /// Called by consumer with a packet they just read from the network.
     /// Extracted messages are delivered to channels, acks are extracted for later consumption.
     pub fn process_incoming_packet(&mut self, buffer: BufHandle) -> Result<(), PacketeerError> {
-        self.counters.packets_received += 1;
+        self.stats.packets_received += 1;
         let mut reader = Cursor::new(buffer.as_ref());
         let header: PacketHeader = PacketHeader::parse(&mut reader)?;
-        debug!(
+        log::trace!(
             "<<< Receiving packet seq:{} ack:{} ack_bits:{:#0b}",
             header.sequence(),
             header.ack(),
@@ -291,14 +286,14 @@ impl Packeteer {
         );
         // if this packet sequence is out of range, reject as stale
         if !self.recv_buffer.check_sequence(header.sequence()) {
-            log::warn!("Ignoring stale packet: {}", header.sequence());
-            self.counters.packets_stale += 1;
+            log::debug!("Ignoring stale packet: {}", header.sequence());
+            self.stats.packets_stale += 1;
             return Err(PacketeerError::StalePacket);
         }
         // if this packet was already received, reject as duplicate
         if self.recv_buffer.exists(header.sequence()) {
-            log::warn!("Ignoring duplicate packet: {}", header.sequence());
-            self.counters.packets_duplicate += 1;
+            log::debug!("Ignoring duplicate packet: {}", header.sequence());
+            self.stats.packets_duplicate += 1;
             return Err(PacketeerError::DuplicatePacket);
         }
         self.recv_buffer.insert(
@@ -344,7 +339,7 @@ impl Packeteer {
                 if let Some(sent_data) = self.sent_buffer.get_mut(ack_sequence) {
                     if !sent_data.acked {
                         // new ack!
-                        self.counters.packets_acked += 1;
+                        self.stats.packets_acked += 1;
                         sent_data.acked = true;
                         // this allows the dispatcher to ack the messages that were sent in this packet
                         self.dispatcher
@@ -362,6 +357,34 @@ impl Packeteer {
             }
             ack_bits >>= 1;
         }
+    }
+
+    // used by tests
+    #[allow(dead_code)]
+    fn channels_mut(&mut self) -> &mut ChannelList {
+        &mut self.channels
+    }
+
+    /// Are there packets sitting in the outbox?
+    ///
+    /// Only used by tests
+    #[allow(dead_code)]
+    fn has_packets_to_send(&self) -> bool {
+        !self.outbox.is_empty()
+    }
+
+    /// Returns the config you passed into `new()`
+    #[allow(unused)]
+    pub fn config(&self) -> &PacketeerConfig {
+        &self.config
+    }
+
+    /// Access to the SentData for a specific packet sequence number.
+    ///
+    /// Used in tests only.
+    #[allow(unused)]
+    fn sent_info(&self, sent_handle: SentHandle) -> Option<&SentData> {
+        self.sent_buffer.get(sent_handle.0)
     }
 }
 
