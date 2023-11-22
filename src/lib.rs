@@ -163,6 +163,10 @@ impl Packeteer {
     }
 
     /// Enqueue a message to be sent in the next available packet, via a channel.
+    ///
+    /// # Panics
+    ///
+    /// Asserts that message_payload is not longer than PacketeerConfig.max_message_size
     pub fn send_message(&mut self, channel: u8, message_payload: &[u8]) -> MessageId {
         assert!(
             message_payload.len() <= self.config.max_message_size,
@@ -320,6 +324,12 @@ impl Packeteer {
     ///
     /// Called by consumer with a packet they just read from the network.
     /// Extracted messages are delivered to channels, acks are extracted for later consumption.
+    ///
+    /// # Errors
+    ///
+    /// * Can return a PacketeerError::Io if parsing packet headers or messages fails.
+    /// * Can return PacketeerError::StalePacket
+    /// /// * Can return PacketeerError::DuplicatePacket
     pub fn process_incoming_packet(&mut self, buffer: BufHandle) -> Result<(), PacketeerError> {
         self.stats.packets_received += 1;
         let mut reader = Cursor::new(buffer.as_ref());

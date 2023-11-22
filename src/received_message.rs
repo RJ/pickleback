@@ -28,6 +28,11 @@ impl ReceivedMessage {
     }
     /// Get MessageId.
     /// In the case of a fragmented message, this is always the ID of the first message.
+    ///
+    /// # Panics
+    ///
+    /// Unwraps messages in the vec, but they must exist - them existing was the trigger to build ReceivedMessage
+    ///
     pub fn id(&self) -> MessageId {
         match &self.message_type {
             ReceivedMessageType::Single(message) => message.id(),
@@ -37,6 +42,11 @@ impl ReceivedMessage {
         }
     }
     /// Channel this message was sent on.
+    ///
+    /// # Panics
+    ///
+    /// Unwraps messages in the vec, but they must exist - them existing was the trigger to build ReceivedMessage
+    ///
     pub fn channel(&self) -> u8 {
         match &self.message_type {
             ReceivedMessageType::Single(message) => message.channel(),
@@ -44,6 +54,11 @@ impl ReceivedMessage {
         }
     }
     /// Length of message payload.
+    ///
+    /// # Panics
+    ///
+    /// Unwraps messages in the vec, but they must exist - them existing was the trigger to build ReceivedMessage
+    ///
     pub fn payload_len(&self) -> usize {
         match &self.message_type {
             ReceivedMessageType::Single(message) => message.size(),
@@ -56,6 +71,11 @@ impl ReceivedMessage {
     ///
     /// In the case of fragmented messages, this will chain together readers over
     /// multiple underlying message buffers.
+    ///
+    /// # Panics
+    ///
+    /// Unwraps messages in the vec, but they must exist - them existing was the trigger to build ReceivedMessage
+    ///
     pub fn payload(&self) -> Box<dyn Read + '_> {
         match &self.message_type {
             ReceivedMessageType::Single(message) => Box::new(Cursor::new(message.as_slice())),
