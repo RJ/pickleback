@@ -69,6 +69,10 @@ impl Default for Packeteer {
 /// Represents one end of a datagram stream between two peers, one of which is the server.
 ///
 impl Packeteer {
+    /// Create new Packeteer instance.
+    ///
+    /// `time` should probably match your game loop time, which might be the number of seconds
+    /// since the game started. You'll be updating this with a `dt` every tick, via `update()`.
     pub fn new(config: PacketeerConfig, time: f64) -> Self {
         let mut channels = ChannelList::default();
         channels.insert(Box::new(UnreliableChannel::new(0, time)));
@@ -183,7 +187,7 @@ impl Packeteer {
                 )? {
                     0 => break,
                     num_written => {
-                        self.stats.message_sends += num_written as u64;
+                        self.stats.messages_sent += num_written as u64;
                     }
                 }
 

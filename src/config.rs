@@ -1,3 +1,9 @@
+/// packet_header_size is the bytes overhead when sending a UDP packet, used to calcualte
+/// actual bandwidth used.
+///
+/// UDP over IPv4 = 20 + 8 bytes, UDP over IPv6 = 40 + 8 bytes.
+///
+///
 #[derive(Clone)]
 pub struct PacketeerConfig {
     pub max_message_size: usize,
@@ -20,7 +26,7 @@ impl Default for PacketeerConfig {
             rtt_smoothing_factor: 0.0025,
             packet_loss_smoothing_factor: 0.1,
             bandwidth_smoothing_factor: 0.1,
-            packet_header_size: 28, // note: UDP over IPv4 = 20 + 8 bytes, UDP over IPv6 = 40 + 8 bytes
+            packet_header_size: 28,
         }
     }
 }
