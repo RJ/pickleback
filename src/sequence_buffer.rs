@@ -140,6 +140,12 @@ where
         self.entries.capacity()
     }
 
+    /// Generate the ack bitfield.
+    ///
+    /// Starting with the largest sequence inserted, work backwards and mask in a 1 if the
+    /// sequence - 1 packet has been received. (ie, we want to ack it)
+    ///
+    /// Any gaps in the sequence numbers, ie missing entries, result in 0 bits in ack bitfield.
     pub fn ack_bits(&self) -> (u16, u32) {
         /*
            TODO 2Do we know the lower bound of packets we need to bother acking?
@@ -148,6 +154,26 @@ where
 
            then varint continuation style on the 4th+ byte and return a Vec<u8> here?
         */
+        let ack = self.sequence;
+        let mut ack_bits: u32 = 0;
+        let mut mask: u32 = 1;
+        for i in 0..33 {
+            let sequence = (Wrapping(ack) - Wrapping(i as u16)).0;
+            if self.exists(sequence) {
+                ack_bits |= mask;
+            }
+
+            mask <<= 1;
+        }
+        (self.sequence, ack_bits)
+    }
+
+    pub(crate) fn ack_bits_writer(&self) -> (u16, u32) {
+        // we have the packeteer.newest_ack, which is the recent ack received from other end.
+        // so we should be able to calcualet a lower bound on our acks. we know everything we acked
+        // in our newest_ack packet was received.
+        // so we need to track, for our outbound packets, what we acked up to.
+        // in the sentdata.
         let ack = self.sequence;
         let mut ack_bits: u32 = 0;
         let mut mask: u32 = 1;

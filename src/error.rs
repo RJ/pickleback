@@ -7,12 +7,27 @@ pub enum PacketeerError {
     SequenceTooOld,
     /// Parsing packet format error
     InvalidPacket,
-    /// Packet arrived too late to be useful
+    /// Packet arrived too late to be useful / out of sequence
     StalePacket,
     /// Already received this packet
     DuplicatePacket,
     /// Parsing message format error
     InvalidMessage,
+    /// Can't send due to backpressure (num of unacks, bandwidth, etc)
+    Backpressure(Backpressure),
+    /// Payload exceeds max_message_size from config
+    PayloadTooBig,
+    /// Channel doesn't exist
+    NoSuchChannel,
+}
+
+/// Reasons for not being able to send due to backpressure
+#[derive(Debug)]
+pub enum Backpressure {
+    /// There are too many unacked packets outstanding, so we can't send any more
+    /// until we receive some acks.
+    TooManyPending,
+    // TODO: bandwidth related reasons, once implemented.
 }
 
 impl std::fmt::Display for PacketeerError {
