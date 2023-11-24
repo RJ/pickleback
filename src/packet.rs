@@ -151,7 +151,7 @@ impl PacketHeader {
         Ok(())
     }
 
-    pub fn parse(reader: &mut Cursor<&Vec<u8>>) -> Result<Self, PacketeerError> {
+    pub fn parse(reader: &mut Cursor<&[u8]>) -> Result<Self, PacketeerError> {
         let prefix_byte = reader.read_u8()?;
 
         if prefix_byte & 1 != 0 {

@@ -1,9 +1,4 @@
-/// packet_header_size is the bytes overhead when sending a UDP packet, used to calcualte
-/// actual bandwidth used.
-///
-/// UDP over IPv4 = 20 + 8 bytes, UDP over IPv6 = 40 + 8 bytes.
-///
-///
+/// Various tunables. Mostly buffer sizes.
 #[derive(Clone)]
 pub struct PacketeerConfig {
     /// Maximum size of a message payload.
@@ -17,6 +12,7 @@ pub struct PacketeerConfig {
     pub sent_packets_buffer_size: usize,
     /// This buffer prevents receiving duplicate packets, and is used for assembling the
     /// ack field sent to the remote endpoint.
+    /// Also the number of previous packets we retain message-id mappings for, for acks.
     pub received_packets_buffer_size: usize,
     /// A newly calculated rtt is blended with the existing rtt using this smoothing factor between 0-1
     /// to avoid large jumps.
@@ -26,6 +22,21 @@ pub struct PacketeerConfig {
     /// An estimate of the header size used to transmit packets, used to calculate true bandwidth usage.
     /// UDP over IPv4 is ~28, and UDP over IPv6 is ~48.
     pub packet_header_size: usize,
+    /// For senders to determine if a sent fragmented message is acked, they need to track the
+    /// ack status of each fragment message. Once all fragments acked, ack the parent message id.
+    /// This is the size of the fragment message id sequence buffer for tracking fragment acks.
+    /// This is a sparsely filled buffer, because often non-fragmented messages make up the bulk of
+    /// transmission. So it needs to be fairly large to support multiple in-flight/unacked fragmented messages.
+    ///
+    /// A fairly extreme scenario:
+    /// Very small unfragmented messages might fit 100 to a packet, and perhaps you're sending
+    /// 100 packets per second. That's 10,000 msg ids per second.
+    /// So you need a buffer size of 10,000 to support acks of sent fragmented messages up to
+    /// a second after transmission, because even unfragmented message ids consume a slot in the map
+    /// due to how sequence buffers work.
+    ///
+    /// Setting a high default. Tune it down if for lower msg/sec send rates accordingly.
+    pub sent_frag_map_size: usize,
 }
 
 impl Default for PacketeerConfig {
@@ -33,12 +44,11 @@ impl Default for PacketeerConfig {
         Self {
             max_message_size: 1024 * 1024,
             max_packet_size: 1150,
-            sent_packets_buffer_size: 256,
-            received_packets_buffer_size: 256,
+            sent_packets_buffer_size: 512,
+            received_packets_buffer_size: 512,
             rtt_smoothing_factor: 0.0025,
-            // packet_loss_smoothing_factor: 0.1,
-            // bandwidth_smoothing_factor: 0.1,
             packet_header_size: 28,
+            sent_frag_map_size: 25000,
         }
     }
 }

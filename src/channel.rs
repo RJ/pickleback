@@ -279,11 +279,6 @@ impl ChannelList {
         self.channels.values_mut().filter(|c| c.any_ready_to_send())
     }
     pub(crate) fn any_with_messages_to_send(&self) -> bool {
-        for ch in self.channels.values() {
-            if ch.any_ready_to_send() {
-                return true;
-            }
-        }
-        false
+        self.channels.values().any(|ch| ch.any_ready_to_send())
     }
 }

@@ -53,6 +53,7 @@ use crate::{
 use byteorder::{NetworkEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{Cursor, Read, Write};
 
+/// A Message, once sent, is identified by a MessageId (a `u16`). Use to check for acks later.
 pub type MessageId = u16;
 
 #[derive(Debug, Clone)]
@@ -103,7 +104,7 @@ impl Fragment {
     }
 
     pub fn parse_header(
-        reader: &mut Cursor<&Vec<u8>>,
+        reader: &mut Cursor<&[u8]>,
         size_mode: MessageSizeMode,
         id: MessageId,
     ) -> Result<(Self, u16), PacketeerError> {
@@ -131,7 +132,7 @@ impl Fragment {
 }
 
 #[derive(PartialEq, Debug, Copy, Clone)]
-pub enum MessageSizeMode {
+pub(crate) enum MessageSizeMode {
     Small,
     Large,
 }
@@ -157,7 +158,7 @@ impl std::fmt::Debug for Message {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Message{{id:{}, payload_len:{} fragment:{:?} channel:{}",
+            "Message{{id:{}, buffer.len:{} fragment:{:?} channel:{}",
             self.id,
             self.buffer.len(),
             self.fragment,
@@ -324,7 +325,7 @@ impl Message {
         Ok(())
     }
 
-    pub fn parse(pool: &BufPool, reader: &mut Cursor<&Vec<u8>>) -> Result<Self, PacketeerError> {
+    pub fn parse(pool: &BufPool, reader: &mut Cursor<&[u8]>) -> Result<Self, PacketeerError> {
         let prefix_byte = reader.read_u8()?;
         let fragmented = prefix_byte & 1 != 0;
         let size_mode = if prefix_byte & (1 << 1) != 0 {
@@ -346,6 +347,7 @@ impl Message {
             let (fragment, payload_size) = Fragment::parse_header(reader, size_mode, id)?;
             (Some(fragment), payload_size)
         };
+        assert!(payload_size > 0, "payload size should be > 0");
         // copy payload from reader into buf
         let mut buf = pool.get_buffer(payload_size as usize);
         if reader.remaining() < payload_size as u64 {
@@ -395,7 +397,7 @@ mod tests {
         buffer.extend_from_slice(msg3.as_slice());
 
         let incoming = Vec::from(buffer.as_slice());
-        let mut cur = Cursor::new(&incoming);
+        let mut cur = Cursor::new(incoming.as_ref());
 
         let recv_msg1 = Message::parse(&pool, &mut cur).unwrap();
         let recv_msg2 = Message::parse(&pool, &mut cur).unwrap();
@@ -437,7 +439,7 @@ mod tests {
         let mut buffer = Vec::with_capacity(1500);
         buffer.extend_from_slice(msg.as_slice());
 
-        let mut incoming = Cursor::new(&buffer);
+        let mut incoming = Cursor::new(buffer.as_ref());
 
         let recv_msg = Message::parse(&pool, &mut incoming).unwrap();
 
