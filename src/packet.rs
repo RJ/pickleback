@@ -21,7 +21,7 @@
 /// | 4 or 4,5           | `u8` or `u16_le` | sequence_difference, depending on sequnce difference bit in PrefixByte. <br> `sequence` - `last_acked_sequence` |
 /// | 5,6,7,8 or 6,7,8,9 | `u8` x 1-4       | ack bits mask                                                                                                   |
 ///
-use crate::{PacketId, PacketeerError};
+use crate::{sequence_buffer::AckIter, PacketId, PacketeerError};
 use byteorder::{NetworkEndian, ReadBytesExt, WriteBytesExt};
 use log::*;
 use std::{
@@ -42,12 +42,35 @@ pub struct PacketHeader {
 // }
 
 impl PacketHeader {
-    pub fn new(id: PacketId, ack_id: PacketId, ack_bits: u32) -> Self {
+    pub fn new(id: PacketId, ack_iter: impl Iterator<Item = (u16, bool)>) -> Self {
+        //ack_id: PacketId, ack_bits: u32) -> Self {
+        let (ack_id, ack_bits) = Self::make_ack_bits(ack_iter);
         Self {
             id,
             ack_id,
             ack_bits,
         }
+    }
+
+    fn make_ack_bits(ack_iter: impl Iterator<Item = (u16, bool)>) -> (PacketId, u32) {
+        let mut peekable_iter = ack_iter.peekable();
+        // peek the first id, which is always the most recent ack.
+        let (ack_id, _) = peekable_iter.peek().expect("ack_bits must be non-empty");
+        let ack_id = *ack_id;
+        let mut mask: u32 = 1;
+        let mut ack_bits: u32 = 0;
+        for (bit_count, (_sequence, is_acked)) in peekable_iter.enumerate() {
+            if bit_count == 32 {
+                panic!("ack bit count exceeded");
+            }
+            if is_acked {
+                ack_bits |= mask;
+                info!("Acking {_sequence}");
+            }
+            mask <<= 1;
+        }
+        info!("ACK_ID = {ack_id} ACK_BITS -> {ack_bits:#032b}");
+        (PacketId(ack_id), ack_bits)
     }
 
     pub fn id(&self) -> PacketId {
@@ -166,7 +189,8 @@ impl PacketHeader {
 
         let mut ack_bits: u32 = 0xFFFF_FFFF;
         let id = PacketId(reader.read_u16::<NetworkEndian>()?);
-        // ack is greatest seqno seen?
+        // ack is greatest seqno seen, ie largest sequence being acked.
+        // it's encoded as a delta vs the packet's seq id.
         let ack_id = if prefix_byte & (1 << 5) != 0 {
             let sequence_difference = reader.read_u8()?;
             PacketId((Wrapping(id.0) - Wrapping(u16::from(sequence_difference))).0)

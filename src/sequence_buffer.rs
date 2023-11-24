@@ -1,30 +1,30 @@
-use crate::PacketeerError;
+use crate::{tracking::RecvData, PacketeerError};
 use std::num::Wrapping;
 
 /// An iterator of received sequence ids
-pub struct AckIter<'a, T>
-where
-    T: Default + std::clone::Clone + Send + Sync,
-{
-    seq_buffer: &'a SequenceBuffer<T>,
+pub struct AckIter<'a> {
+    seq_buffer: &'a SequenceBuffer<RecvData>,
     i: u16,
     max: u16,
 }
-impl<'a, T: Default + std::clone::Clone + Send + Sync> Iterator for AckIter<'a, T> {
+impl<'a> Iterator for AckIter<'a> {
     type Item = (u16, bool);
     fn next(&mut self) -> Option<Self::Item> {
         if self.i >= self.max {
             None
         } else {
-            self.i += 1;
             let sequence = (Wrapping(self.seq_buffer.sequence) - Wrapping(self.i)).0;
             let exists = self.seq_buffer.exists(sequence);
+            self.i += 1;
             Some((sequence, exists))
         }
     }
 }
-impl<'a, T: Default + std::clone::Clone + Send + Sync> AckIter<'a, T> {
-    fn with_length(seq_buffer: &'a SequenceBuffer<T>, length: u16) -> AckIter<'a, T> {
+impl<'a> AckIter<'a> {
+    pub(crate) fn with_length(
+        seq_buffer: &'a SequenceBuffer<RecvData>,
+        length: u16,
+    ) -> AckIter<'a> {
         AckIter {
             seq_buffer,
             i: 0,
@@ -186,32 +186,6 @@ where
 
            then varint continuation style on the 4th+ byte and return a Vec<u8> here?
         */
-        let ack = self.sequence;
-        let mut ack_bits: u32 = 0;
-        let mut mask: u32 = 1;
-        for i in 0..33 {
-            let sequence = (Wrapping(ack) - Wrapping(i as u16)).0;
-            if self.exists(sequence) {
-                ack_bits |= mask;
-            }
-
-            mask <<= 1;
-        }
-        (self.sequence, ack_bits)
-    }
-
-    /// Gives an iter starting with the buffer's sequence, and going backwards for len items,
-    /// yielding (seq, is_acked)
-    pub fn ack_iter(&self, len: u16) -> AckIter<T> {
-        AckIter::with_length(self, len)
-    }
-
-    pub(crate) fn ack_bits_writer(&self) -> (u16, u32) {
-        // we have the packeteer.newest_ack, which is the recent ack received from other end.
-        // so we should be able to calcualet a lower bound on our acks. we know everything we acked
-        // in our newest_ack packet was received.
-        // so we need to track, for our outbound packets, what we acked up to.
-        // in the sentdata.
         let ack = self.sequence;
         let mut ack_bits: u32 = 0;
         let mut mask: u32 = 1;
