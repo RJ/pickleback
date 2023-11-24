@@ -34,9 +34,10 @@ fn soak_message_transmission() {
     let mut sent_ids = VecDeque::new();
 
     'sending: while !test_msgs.is_empty() {
-        // Send up to num_to-
-        let num_to_send = rand::random::<usize>() % 5;
+        // Send up to num_to-  NB: check MAX_FRAGMENTS * this is under ack limit.
+        let num_to_send = rand::random::<usize>() % 3;
         let mut num_sent = 0;
+
         for _ in 0..num_to_send {
             let Some(msg) = send_msgs_iter.next() else {
                 if num_sent == 0 {
@@ -121,7 +122,7 @@ fn soak_reliable_message_transmission_with_terrible_network() {
         }
 
         let stats = harness.advance(0.051);
-        // info!("{stats:?}");
+        info!("{stats:?}");
 
         let acked_ids = harness.collect_server_acks(channel);
         if !acked_ids.is_empty() {

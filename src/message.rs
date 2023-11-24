@@ -348,7 +348,6 @@ impl Message {
             let (fragment, payload_size) = Fragment::parse_header(reader, size_mode, id)?;
             (Some(fragment), payload_size)
         };
-        assert!(payload_size > 0, "payload size should be > 0");
         // copy payload from reader into buf
         let mut buf = pool.get_buffer(payload_size as usize);
         if reader.remaining() < payload_size as u64 {

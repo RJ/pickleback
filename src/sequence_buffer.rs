@@ -1,6 +1,38 @@
 use crate::PacketeerError;
 use std::num::Wrapping;
 
+/// An iterator of received sequence ids
+pub struct AckIter<'a, T>
+where
+    T: Default + std::clone::Clone + Send + Sync,
+{
+    seq_buffer: &'a SequenceBuffer<T>,
+    i: u16,
+    max: u16,
+}
+impl<'a, T: Default + std::clone::Clone + Send + Sync> Iterator for AckIter<'a, T> {
+    type Item = (u16, bool);
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.i >= self.max {
+            None
+        } else {
+            self.i += 1;
+            let sequence = (Wrapping(self.seq_buffer.sequence) - Wrapping(self.i)).0;
+            let exists = self.seq_buffer.exists(sequence);
+            Some((sequence, exists))
+        }
+    }
+}
+impl<'a, T: Default + std::clone::Clone + Send + Sync> AckIter<'a, T> {
+    fn with_length(seq_buffer: &'a SequenceBuffer<T>, length: u16) -> AckIter<'a, T> {
+        AckIter {
+            seq_buffer,
+            i: 0,
+            max: length,
+        }
+    }
+}
+
 pub struct SequenceBuffer<T>
 where
     T: Default + std::clone::Clone + Send + Sync,
@@ -166,6 +198,12 @@ where
             mask <<= 1;
         }
         (self.sequence, ack_bits)
+    }
+
+    /// Gives an iter starting with the buffer's sequence, and going backwards for len items,
+    /// yielding (seq, is_acked)
+    pub fn ack_iter(&self, len: u16) -> AckIter<T> {
+        AckIter::with_length(self, len)
     }
 
     pub(crate) fn ack_bits_writer(&self) -> (u16, u32) {

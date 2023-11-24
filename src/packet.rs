@@ -36,6 +36,11 @@ pub struct PacketHeader {
     ack_bits: u32,
 }
 
+// pub(crate) struct AckWindow {
+//     pub(crate) ack_id: PacketId,
+//     pub(crate)
+// }
+
 impl PacketHeader {
     pub fn new(id: PacketId, ack_id: PacketId, ack_bits: u32) -> Self {
         Self {

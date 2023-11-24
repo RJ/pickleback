@@ -9,6 +9,10 @@
   then packeteer copies it to a pooled buffer,
 * could offer an option to grab a pooled buffer and write to that, if you know the size of msg?
 
+## Max in-flight packets / ack limitations
+
+Say you need to send a burst of packets for a large payload, you send 30 fragments.
+Now there are 30 unacked packets in flight. If you send 
 
 **A protocol layer for unreliable datagram exchange**
 
