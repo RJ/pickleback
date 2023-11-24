@@ -9,8 +9,13 @@ use crate::*;
 pub fn init_logger() {
     let _ = env_logger::builder()
         .write_style(env_logger::WriteStyle::Always)
-        .is_test(true)
+        // .is_test(true)
         .try_init();
+}
+
+pub fn random_payload_max_frags(max_fragments: u32) -> Vec<u8> {
+    let size = 1 + rand::random::<u32>() % (1024 * max_fragments - 1);
+    random_payload(size)
 }
 
 pub fn random_payload(size: u32) -> Vec<u8> {

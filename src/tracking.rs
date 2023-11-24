@@ -1,16 +1,20 @@
+use crate::PacketId;
+
 #[derive(Debug, Clone)]
 pub(crate) struct SentData {
     pub(crate) time: f64,
     pub(crate) acked: bool,
     pub(crate) size: usize,
+    pub(crate) acked_up_to: PacketId,
 }
 
 impl SentData {
-    pub fn new(time: f64, size: usize) -> Self {
+    pub fn new(time: f64, size: usize, acked_up_to: PacketId) -> Self {
         Self {
             time,
             size,
             acked: false,
+            acked_up_to,
         }
     }
     #[allow(unused)]
@@ -29,6 +33,7 @@ impl Default for SentData {
             time: 0.0,
             size: 0,
             acked: false,
+            acked_up_to: PacketId(0),
         }
     }
 }

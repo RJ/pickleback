@@ -37,9 +37,9 @@ pub struct PacketHeader {
 }
 
 impl PacketHeader {
-    pub fn new(sequence: PacketId, ack_id: PacketId, ack_bits: u32) -> Self {
+    pub fn new(id: PacketId, ack_id: PacketId, ack_bits: u32) -> Self {
         Self {
-            id: sequence,
+            id,
             ack_id,
             ack_bits,
         }
