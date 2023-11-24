@@ -12,12 +12,12 @@ impl MessageHandle {
     }
     pub fn parent_id(&self) -> Option<MessageId> {
         self.frag_index
-            .map(|frag_index| self.id.wrapping_sub(frag_index))
+            .map(|frag_index| MessageId(self.id.0.wrapping_sub(frag_index)))
     }
 }
 
 pub(crate) struct MessageDispatcher {
-    next_message_id: MessageId,
+    next_message_id: u16,
     sent_frag_map: SentFragMap,
     messages_in_packets: SequenceBuffer<Vec<MessageHandle>>,
     message_reassembler: MessageReassembler,
@@ -108,7 +108,7 @@ impl MessageDispatcher {
                             .or_default()
                             .push(parent_id);
                     } else {
-                        info!("got fragment ack for parent {parent_id}, but not all yet {msg_handle:?} ");
+                        info!("got fragment ack for parent {parent_id:?}, but not all yet {msg_handle:?} ");
                     }
                 } else {
                     // non-fragment messages directly map to an acked message
@@ -167,7 +167,7 @@ impl MessageDispatcher {
                 id = self.next_message_id();
             }
             frag_ids.push(id);
-            info!("Adding frag msg {id} frag:{index}/{num_fragments}");
+            info!("Adding frag msg {id:?} frag:{index}/{num_fragments}");
             let fragment = Fragment {
                 index,
                 num_fragments,
@@ -186,7 +186,7 @@ impl MessageDispatcher {
     fn next_message_id(&mut self) -> MessageId {
         let ret = self.next_message_id;
         self.next_message_id = self.next_message_id.wrapping_add(1);
-        ret
+        MessageId(ret)
     }
 }
 
@@ -214,36 +214,36 @@ impl SentFragMap {
     pub(crate) fn insert_fragmented_message(
         &mut self,
         id: MessageId,
-        fragment_ids: Vec<u16>,
+        fragment_ids: Vec<MessageId>,
     ) -> Result<(), PacketeerError> {
-        match self.m.insert(FragAckStatus::Partial(fragment_ids), id) {
+        match self.m.insert(FragAckStatus::Partial(fragment_ids), id.0) {
             Ok(_) => Ok(()),
             Err(e) => Err(e),
         }
     }
     /// returns true if parent message is whole/acked.
     pub fn ack_fragment_message(&mut self, parent_id: MessageId, fragment_id: MessageId) -> bool {
-        let Some(entry) = self.m.get_mut(parent_id) else {
+        let Some(entry) = self.m.get_mut(parent_id.0) else {
             return false;
         };
         let ret = match entry {
             FragAckStatus::Complete => {
-                trace!("Message {parent_id} already completed arrived.");
+                trace!("Message {parent_id:?} already completed arrived.");
                 false
             }
             FragAckStatus::Unknown => {
-                warn!("Message {parent_id} unknown to frag map");
+                warn!("Message {parent_id:?} unknown to frag map");
                 false
             }
             FragAckStatus::Partial(ref mut remaining) => {
                 remaining.retain(|id| *id != fragment_id);
-                info!("Remaining fragment indexs for parent {parent_id}, fragment_id={fragment_id} = {remaining:?}");
+                info!("Remaining fragment indexs for parent {parent_id:?}, fragment_id={fragment_id:?} = {remaining:?}");
                 remaining.is_empty()
             }
         };
         if ret {
-            self.m.insert(FragAckStatus::Complete, parent_id).unwrap();
-            trace!("Message fully acked, all fragments accounted for {parent_id}");
+            self.m.insert(FragAckStatus::Complete, parent_id.0).unwrap();
+            trace!("Message fully acked, all fragments accounted for {parent_id:?}");
         }
         ret
     }

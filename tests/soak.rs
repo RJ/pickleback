@@ -102,7 +102,7 @@ fn soak_reliable_message_transmission_with_terrible_network() {
         if let Some(msg) = test_msgs.get(i) {
             let size = msg.len();
             let msg_id = harness.server.send_message(channel, msg.as_ref()).unwrap();
-            trace!("💌💌 Sending message {i}/{NUM_TEST_MSGS}, size {size},  msg_id: {msg_id}");
+            trace!("💌💌 Sending message {i}/{NUM_TEST_MSGS}, size {size},  msg_id: {msg_id:?}");
             unacked_sent_msg_ids.push(msg_id);
         }
 

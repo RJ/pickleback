@@ -54,7 +54,8 @@ use byteorder::{NetworkEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{Cursor, Read, Write};
 
 /// A Message, once sent, is identified by a MessageId (a `u16`). Use to check for acks later.
-pub type MessageId = u16;
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, Default)]
+pub struct MessageId(pub u16);
 
 #[derive(Debug, Clone)]
 pub(crate) struct Fragment {
@@ -124,7 +125,7 @@ impl Fragment {
             Fragment {
                 index: fragment_id,
                 num_fragments,
-                parent_id: id.wrapping_sub(fragment_id),
+                parent_id: MessageId(id.0.wrapping_sub(fragment_id)),
             },
             payload_size,
         ))
@@ -158,7 +159,7 @@ impl std::fmt::Debug for Message {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Message{{id:{}, buffer.len:{} fragment:{:?} channel:{}",
+            "Message{{id:{:?}, buffer.len:{} fragment:{:?} channel:{}",
             self.id,
             self.buffer.len(),
             self.fragment,
@@ -312,7 +313,7 @@ impl Message {
         prefix_byte |= channel_mask;
 
         writer.write_u8(prefix_byte)?;
-        writer.write_u16::<NetworkEndian>(id)?;
+        writer.write_u16::<NetworkEndian>(id.0)?;
 
         if let Some(fragment) = fragment.as_ref() {
             fragment.write_header(writer, payload_len as u16, size_mode)?;
@@ -334,7 +335,7 @@ impl Message {
             MessageSizeMode::Small
         };
         // let spare_flag = prefix_byte & (1 << 2) != 0
-        let id = reader.read_u16::<NetworkEndian>()?;
+        let id = MessageId(reader.read_u16::<NetworkEndian>()?);
         let channel = prefix_byte >> 3;
         // TODO refac into MessageHeader which has an opt fragment and does the parsing?
         let (fragment, payload_size) = if !fragmented {
@@ -351,7 +352,7 @@ impl Message {
         // copy payload from reader into buf
         let mut buf = pool.get_buffer(payload_size as usize);
         if reader.remaining() < payload_size as u64 {
-            log::warn!("Payload appears truncated for message {id}");
+            log::warn!("Payload appears truncated for message {id:?}");
             return Err(PacketeerError::InvalidMessage);
         }
         reader.take(payload_size as u64).read_to_end(&mut buf)?;
@@ -381,15 +382,16 @@ mod tests {
         let payload1 = b"HELLO";
         let payload2 = b"FRAGMENTED";
         let payload3 = b"WORLD";
-        let msg1 = Message::new_outbound(&pool, 1, 1, payload1, Fragmented::No);
+        let msg1 = Message::new_outbound(&pool, MessageId(1), 1, payload1, Fragmented::No);
         // the last fragment can be a small msg that rides along with other unfragmented messages:
         let fragment = Fragment {
             index: 0,
             num_fragments: 1,
-            parent_id: 1,
+            parent_id: MessageId(1),
         };
-        let msg2 = Message::new_outbound(&pool, 3, 5, payload2, Fragmented::Yes(fragment));
-        let msg3 = Message::new_outbound(&pool, 2, 16, payload3, Fragmented::No);
+        let msg2 =
+            Message::new_outbound(&pool, MessageId(3), 5, payload2, Fragmented::Yes(fragment));
+        let msg3 = Message::new_outbound(&pool, MessageId(2), 16, payload3, Fragmented::No);
 
         let mut buffer = Vec::with_capacity(1500);
         buffer.extend_from_slice(msg1.as_slice());
@@ -432,9 +434,9 @@ mod tests {
         let fragment = Fragment {
             index: 0,
             num_fragments: 10,
-            parent_id: 1,
+            parent_id: MessageId(1),
         };
-        let msg = Message::new_outbound(&pool, 0, 0, payload, Fragmented::Yes(fragment));
+        let msg = Message::new_outbound(&pool, MessageId(0), 0, payload, Fragmented::Yes(fragment));
 
         let mut buffer = Vec::with_capacity(1500);
         buffer.extend_from_slice(msg.as_slice());

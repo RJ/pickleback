@@ -3,6 +3,8 @@ pub const MAX_CHANNELS: usize = 32;
 
 type BoxedChannel = Box<dyn Channel>;
 
+// TODO use enum_dispatch? https://docs.rs/enum_dispatch/latest/enum_dispatch
+
 pub(crate) trait Channel {
     fn id(&self) -> u8;
     fn update(&mut self, time: f64);
@@ -47,15 +49,15 @@ impl Channel for UnreliableChannel {
     }
     // need to not recv duplicate msgs or fragments somehow. fragmap knows..
     fn accepts_message(&mut self, msg: &Message) -> bool {
-        if !self.seen_buf.check_sequence(msg.id()) {
+        if !self.seen_buf.check_sequence(msg.id().0) {
             warn!("Rejecting too-old message on chanel {msg:?}");
             return false;
         }
-        if self.seen_buf.exists(msg.id()) {
+        if self.seen_buf.exists(msg.id().0) {
             // warn!("Rejecting already seen message on channel {msg:?}");
             return false;
         }
-        match self.seen_buf.insert(true, msg.id()) {
+        match self.seen_buf.insert(true, msg.id().0) {
             Ok(_) => true,
             Err(e) => {
                 warn!("not accepting message {msg:?} = {e:?}");
@@ -150,15 +152,15 @@ impl Channel for ReliableChannel {
         self.time += dt;
     }
     fn accepts_message(&mut self, msg: &Message) -> bool {
-        if !self.seen_buf.check_sequence(msg.id()) {
+        if !self.seen_buf.check_sequence(msg.id().0) {
             warn!("Rejecting too-old message on chanel {msg:?}");
             return false;
         }
-        if self.seen_buf.exists(msg.id()) {
+        if self.seen_buf.exists(msg.id().0) {
             // warn!("Rejecting already seen message on channel {msg:?}");
             return false;
         }
-        match self.seen_buf.insert(true, msg.id()) {
+        match self.seen_buf.insert(true, msg.id().0) {
             Ok(_) => true,
             Err(e) => {
                 warn!("not accepting message {msg:?} = {e:?}");
@@ -220,7 +222,7 @@ mod tests {
         let pool = BufPool::empty();
         let mut channel = UnreliableChannel::new(0, 1.0);
         let payload = b"hello";
-        channel.enqueue_message(&pool, 0, payload, Fragmented::No);
+        channel.enqueue_message(&pool, MessageId(0), payload, Fragmented::No);
         assert!(channel.any_ready_to_send());
         assert!(channel.get_message_to_write_to_a_packet(999999).is_some());
         channel.update(1.0);
@@ -234,7 +236,7 @@ mod tests {
         let channel_id = 0;
         let mut channel = ReliableChannel::new(channel_id, 1.0);
         let payload = b"hello";
-        let message_id = 123;
+        let message_id = MessageId(123);
         channel.enqueue_message(&pool, message_id, payload, Fragmented::No);
         assert!(channel.any_ready_to_send());
         assert!(channel.get_message_to_write_to_a_packet(999999).is_some());

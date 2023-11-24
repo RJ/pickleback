@@ -814,13 +814,13 @@ mod tests {
             .channels_mut()
             .get_mut(channel)
             .unwrap()
-            .enqueue_message(&pool, 123, payload, Fragmented::No);
+            .enqueue_message(&pool, MessageId(123), payload, Fragmented::No);
         harness
             .server
             .channels_mut()
             .get_mut(channel)
             .unwrap()
-            .enqueue_message(&pool, 123, payload, Fragmented::No);
+            .enqueue_message(&pool, MessageId(123), payload, Fragmented::No);
         harness.advance(1.);
         assert_eq!(harness.client.drain_received_messages(channel).len(), 1);
     }
