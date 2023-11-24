@@ -236,27 +236,27 @@ impl Packeteer {
     }
 
     /// Creates a PacketHeader using the next packet sequence number, and an ack-field of recent acks.
-    fn next_packet_header(&mut self) -> PacketHeader {
+    fn next_packet_header(&mut self) -> Result<PacketHeader, PacketeerError> {
         self.sequence_id = self.sequence_id.wrapping_add(1);
         let id = PacketId(self.sequence_id);
         let num_acks_required = self.received_unacked_packets();
 
         info!("Num acks required in packet id {id:?} = {num_acks_required}");
 
-        // if we have to ack more packets than the max, our ack system is broken.
-        assert!(
-            num_acks_required <= MAX_UNACKED_PACKETS,
-            "MAX_UNACKED_PACKETS breached: {num_acks_required}"
-        );
+        if num_acks_required >= MAX_UNACKED_PACKETS {
+            return Err(PacketeerError::Backpressure(Backpressure::TooManyPending));
+        }
 
-        let (ack_id, ack_bits) = self.recv_buffer.ack_bits();
-
-        PacketHeader::new(id, PacketId(ack_id), ack_bits)
+        let ack_iter = AckIter::with_length(&self.recv_buffer, 32);
+        // let (ack_id, ack_bits) = self.recv_buffer.ack_bits();
+        let ret = PacketHeader::new(id, ack_iter);
+        // info!("Original ack_id: {ack_id}, ack_bits = {ack_bits:#032b}");
+        Ok(ret)
     }
 
     /// Calls `next_packet_header()` and writes it to the provided cursor, returning the bytes written
     fn write_packet_header(&mut self, cursor: &mut impl Write) -> Result<usize, PacketeerError> {
-        let header = self.next_packet_header();
+        let header = self.next_packet_header()?;
         debug!(
             ">>> Sending packet id:{:?} ack_id:{:?} ack_bits:{:#0b}",
             header.id(),
@@ -809,12 +809,13 @@ mod tests {
         crate::test_utils::init_logger();
 
         let write_id = PacketId(10000);
+        let ack_iter = [(100, true)].into_iter();
         let write_ack_id = PacketId(100);
         let write_ack_bits = 123;
 
         let mut buffer = Vec::new();
         let mut cur = Cursor::new(&mut buffer);
-        let write_packet = PacketHeader::new(write_id, write_ack_id, write_ack_bits);
+        let write_packet = PacketHeader::new(write_id, ack_iter); //write_ack_id, write_ack_bits);
         write_packet.write(&mut cur).unwrap();
 
         let mut reader = Cursor::new(buffer.as_ref());
