@@ -70,7 +70,7 @@ impl MessageDispatcher {
     /// sets the list of messageids contained in the packet
     pub(crate) fn set_packet_message_handles(
         &mut self,
-        packet_handle: SentHandle,
+        packet_handle: PacketId,
         message_handles: Vec<MessageHandle>,
     ) -> Result<(), PacketeerError> {
         info!(">>> {packet_handle:?} CONTAINS msg ids: {message_handles:?}");
@@ -81,11 +81,7 @@ impl MessageDispatcher {
 
     // updates ack_inbox with messages acked as a result of this packet being acks.
     // informs channels of acks so they can cleanup
-    pub(crate) fn acked_packet(
-        &mut self,
-        packet_handle: &SentHandle,
-        channel_list: &mut ChannelList,
-    ) {
+    pub(crate) fn acked_packet(&mut self, packet_handle: PacketId, channel_list: &mut ChannelList) {
         // check message handles that were just acked - if any are fragments, we need to log that
         // in the frag map, incase it results in a parent message id being acked (ie, all frag messages are now acked)
         if let Some(msg_handles) = self.messages_in_packets.remove(packet_handle.0) {

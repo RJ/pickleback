@@ -79,15 +79,15 @@ pub mod prelude {
 }
 
 /// returned from send - contains packet seqno
-#[derive(Debug, Eq, PartialEq, Hash)]
-pub struct SentHandle(u16);
+#[derive(Debug, Eq, PartialEq, Hash, Clone, Copy, PartialOrd, Ord, Default)]
+pub(crate) struct PacketId(pub(crate) u16);
 
 /// An instance of Packeteer represents one of the two endpoints at either side of a link
 pub struct Packeteer {
     time: f64,
     rtt: f32,
     config: PacketeerConfig,
-    sequence: u16,
+    sequence_id: u16,
     newest_ack: Option<u16>,
     dispatcher: MessageDispatcher,
     channels: ChannelList,
@@ -119,7 +119,7 @@ impl Packeteer {
             time,
             rtt: 0.0,
             config: config.clone(),
-            sequence: 0,
+            sequence_id: 0,
             newest_ack: None,
             sent_buffer: SequenceBuffer::with_capacity(config.sent_packets_buffer_size),
             recv_buffer: SequenceBuffer::with_capacity(config.received_packets_buffer_size),
@@ -200,24 +200,24 @@ impl Packeteer {
 
     fn unacked_packets_in_flight(&self) -> u16 {
         let newest_ack = self.newest_ack.unwrap_or_default();
-        (Wrapping(self.sequence) - Wrapping(newest_ack)).0
+        (Wrapping(self.sequence_id) - Wrapping(newest_ack)).0
     }
 
     /// Creates a PacketHeader using the next packet sequence number, and an ack-field of recent acks.
     fn next_packet_header(&mut self) -> PacketHeader {
-        self.sequence = self.sequence.wrapping_add(1);
-        let sequence = self.sequence;
-        let (ack, ack_bits) = self.recv_buffer.ack_bits();
-        PacketHeader::new(sequence, ack, ack_bits)
+        self.sequence_id = self.sequence_id.wrapping_add(1);
+        let id = PacketId(self.sequence_id);
+        let (ack_id, ack_bits) = self.recv_buffer.ack_bits();
+        PacketHeader::new(id, PacketId(ack_id), ack_bits)
     }
 
     /// Calls `next_packet_header()` and writes it to the provided cursor, returning the bytes written
     fn write_packet_header(&mut self, cursor: &mut impl Write) -> Result<usize, PacketeerError> {
         let header = self.next_packet_header();
         debug!(
-            ">>> Sending packet seq:{} ack:{} ack_bits:{:#0b}",
-            header.sequence(),
-            header.ack(),
+            ">>> Sending packet id:{:?} ack_id:{:?} ack_bits:{:#0b}",
+            header.id(),
+            header.ack_id(),
             header.ack_bits()
         );
         header.write(cursor)?;
@@ -272,7 +272,7 @@ impl Packeteer {
                 writer = None;
                 self.send_packet(packet.take().unwrap())?;
                 self.dispatcher.set_packet_message_handles(
-                    SentHandle(self.sequence),
+                    PacketId(self.sequence_id),
                     std::mem::take(&mut message_handles_in_packet),
                 )?;
             }
@@ -329,7 +329,7 @@ impl Packeteer {
     fn send_packet(&mut self, packet: BufHandle) -> Result<(), PacketeerError> {
         let send_size = packet.len() + self.config.packet_header_size;
         self.sent_buffer
-            .insert(SentData::new(self.time, send_size), self.sequence)?;
+            .insert(SentData::new(self.time, send_size), self.sequence_id)?;
         self.outbox.push_back(packet);
         self.stats.packets_sent += 1;
         Ok(())
@@ -365,26 +365,26 @@ impl Packeteer {
         let mut reader = Cursor::new(packet);
         let header: PacketHeader = PacketHeader::parse(&mut reader)?;
         log::trace!(
-            "<<< Receiving packet seq:{} ack:{} ack_bits:{:#0b}",
-            header.sequence(),
-            header.ack(),
+            "<<< Receiving packet id:{:?} ack_id:{:?} ack_bits:{:#0b}",
+            header.id(),
+            header.ack_id(),
             header.ack_bits()
         );
         // if this packet sequence is out of range, reject as stale
-        if !self.recv_buffer.check_sequence(header.sequence()) {
-            log::debug!("Ignoring stale packet: {}", header.sequence());
+        if !self.recv_buffer.check_sequence(header.id().0) {
+            log::debug!("Ignoring stale packet: {}", header.id().0);
             self.stats.packets_stale += 1;
             return Err(PacketeerError::StalePacket);
         }
         // if this packet was already received, reject as duplicate
-        if self.recv_buffer.exists(header.sequence()) {
-            log::debug!("Ignoring duplicate packet: {}", header.sequence());
+        if self.recv_buffer.exists(header.id().0) {
+            log::debug!("Ignoring duplicate packet: {:?}", header.id());
             self.stats.packets_duplicate += 1;
             return Err(PacketeerError::DuplicatePacket);
         }
         self.recv_buffer.insert(
             RecvData::new(self.time, self.config.packet_header_size + packet.len()),
-            header.sequence(),
+            header.id().0,
         )?;
         self.process_packet_acks_and_rtt(&header);
         self.process_packet_messages(&mut reader)?;
@@ -425,7 +425,7 @@ impl Packeteer {
         //     header.ack()
         // );
         for i in 0..32 {
-            let ack_sequence = header.ack().wrapping_sub(i);
+            let ack_sequence = header.ack_id().0.wrapping_sub(i);
             if ack_bits & 1 != 0 {
                 if let Some(sent_data) = self.sent_buffer.get_mut(ack_sequence) {
                     if !sent_data.acked {
@@ -445,7 +445,7 @@ impl Packeteer {
                         sent_data.acked = true;
                         // this allows the dispatcher to ack the messages that were sent in this packet
                         self.dispatcher
-                            .acked_packet(&SentHandle(ack_sequence), &mut self.channels);
+                            .acked_packet(PacketId(ack_sequence), &mut self.channels);
                         // update rtt calculations
                         let rtt: f32 = (self.time - sent_data.time) as f32 * 1000.0;
                         if (self.rtt == 0.0 && rtt > 0.0) || (self.rtt - rtt).abs() < 0.00001 {
@@ -489,7 +489,7 @@ impl Packeteer {
     ///
     /// Used in tests only.
     #[allow(unused)]
-    fn sent_info(&self, sent_handle: SentHandle) -> Option<&SentData> {
+    fn sent_info(&self, sent_handle: PacketId) -> Option<&SentData> {
         self.sent_buffer.get(sent_handle.0)
     }
 }
@@ -721,20 +721,20 @@ mod tests {
     fn packet_header() {
         crate::test_utils::init_logger();
 
-        let write_sequence = 10000;
-        let write_ack = 100;
+        let write_id = PacketId(10000);
+        let write_ack_id = PacketId(100);
         let write_ack_bits = 123;
 
         let mut buffer = Vec::new();
         let mut cur = Cursor::new(&mut buffer);
-        let write_packet = PacketHeader::new(write_sequence, write_ack, write_ack_bits);
+        let write_packet = PacketHeader::new(write_id, write_ack_id, write_ack_bits);
         write_packet.write(&mut cur).unwrap();
 
         let mut reader = Cursor::new(buffer.as_ref());
         let read_packet = PacketHeader::parse(&mut reader).unwrap();
 
-        assert_eq!(write_packet.sequence(), read_packet.sequence());
-        assert_eq!(write_packet.ack(), read_packet.ack());
+        assert_eq!(write_packet.id(), read_packet.id());
+        assert_eq!(write_packet.ack_id(), read_packet.ack_id());
         assert_eq!(write_packet.ack_bits(), read_packet.ack_bits());
     }
 
