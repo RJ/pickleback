@@ -21,7 +21,7 @@
 /// | 4 or 4,5           | `u8` or `u16_le` | sequence_difference, depending on sequnce difference bit in PrefixByte. <br> `sequence` - `last_acked_sequence` |
 /// | 5,6,7,8 or 6,7,8,9 | `u8` x 1-4       | ack bits mask                                                                                                   |
 ///
-use crate::PacketeerError;
+use crate::{PacketId, PacketeerError};
 use byteorder::{NetworkEndian, ReadBytesExt, WriteBytesExt};
 use log::*;
 use std::{
@@ -31,25 +31,25 @@ use std::{
 
 #[derive(Clone, PartialEq, PartialOrd, Debug, Default)]
 pub struct PacketHeader {
-    sequence: u16,
-    ack: u16,
+    id: PacketId,
+    ack_id: PacketId,
     ack_bits: u32,
 }
 
 impl PacketHeader {
-    pub fn new(sequence: u16, ack: u16, ack_bits: u32) -> Self {
+    pub fn new(sequence: PacketId, ack_id: PacketId, ack_bits: u32) -> Self {
         Self {
-            sequence,
-            ack,
+            id: sequence,
+            ack_id,
             ack_bits,
         }
     }
 
-    pub fn sequence(&self) -> u16 {
-        self.sequence
+    pub fn id(&self) -> PacketId {
+        self.id
     }
-    pub fn ack(&self) -> u16 {
-        self.ack
+    pub fn ack_id(&self) -> PacketId {
+        self.ack_id
     }
     pub fn ack_bits(&self) -> u32 {
         self.ack_bits
@@ -62,7 +62,7 @@ impl PacketHeader {
     pub fn size(&self) -> usize {
         let mut size: usize = 3;
 
-        let mut sequence_difference = i32::from((Wrapping(self.sequence) - Wrapping(self.ack)).0);
+        let mut sequence_difference = i32::from((Wrapping(self.id.0) - Wrapping(self.ack_id.0)).0);
         if sequence_difference < 0 {
             sequence_difference = (Wrapping(sequence_difference) + Wrapping(65536)).0;
         }
@@ -114,7 +114,7 @@ impl PacketHeader {
             prefix_byte |= 1 << 4;
         }
 
-        let mut sequence_difference = i32::from((Wrapping(self.sequence) - Wrapping(self.ack)).0);
+        let mut sequence_difference = i32::from((Wrapping(self.id.0) - Wrapping(self.ack_id.0)).0);
         if sequence_difference < 0 {
             sequence_difference = (Wrapping(sequence_difference) + Wrapping(65536)).0;
         }
@@ -124,12 +124,12 @@ impl PacketHeader {
         }
 
         writer.write_u8(prefix_byte)?; // 1
-        writer.write_u16::<NetworkEndian>(self.sequence)?; // +2 = 3
+        writer.write_u16::<NetworkEndian>(self.id.0)?; // +2 = 3
 
         if sequence_difference <= 255 {
             writer.write_u8(sequence_difference as u8)?; // +1 = 4
         } else {
-            writer.write_u16::<NetworkEndian>(self.ack)?; // or +2 = 5
+            writer.write_u16::<NetworkEndian>(self.ack_id.0)?; // or +2 = 5
         }
         // +4:
         if (self.ack_bits & 0x0000_00FF) != 0x0000_00FF {
@@ -160,13 +160,13 @@ impl PacketHeader {
         }
 
         let mut ack_bits: u32 = 0xFFFF_FFFF;
-        let sequence = reader.read_u16::<NetworkEndian>()?;
+        let id = PacketId(reader.read_u16::<NetworkEndian>()?);
         // ack is greatest seqno seen?
-        let ack = if prefix_byte & (1 << 5) != 0 {
+        let ack_id = if prefix_byte & (1 << 5) != 0 {
             let sequence_difference = reader.read_u8()?;
-            (Wrapping(sequence) - Wrapping(u16::from(sequence_difference))).0
+            PacketId((Wrapping(id.0) - Wrapping(u16::from(sequence_difference))).0)
         } else {
-            reader.read_u16::<NetworkEndian>()?
+            PacketId(reader.read_u16::<NetworkEndian>()?)
         };
 
         // let mut expected_ack_bytes: usize = 0;
@@ -201,8 +201,8 @@ impl PacketHeader {
         }
 
         Ok(Self {
-            sequence,
-            ack,
+            id,
+            ack_id,
             ack_bits,
         })
     }
