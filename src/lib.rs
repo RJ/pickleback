@@ -198,7 +198,12 @@ impl Packeteer {
         if message_payload.len() > self.config.max_message_size {
             return Err(PacketeerError::PayloadTooBig);
         }
-        if self.unacked_packets_in_flight() >= MAX_UNACKED_PACKETS {
+        // calling send_message doesn't generate packets or update the sent_unacked_packets count,
+        // but perhaps last tick sent enough packets that this condition exists now, and if so, we
+        // can reject sends here. Not sure if we should, or if it should be delegated to channels,
+        // but for now it suits the tests to reject here:
+        if self.sent_unacked_packets() >= MAX_UNACKED_PACKETS {
+            warn!("Can't sent, too many pending");
             return Err(PacketeerError::Backpressure(Backpressure::TooManyPending));
         }
         self.stats.message_sends += 1;
@@ -209,35 +214,40 @@ impl Packeteer {
             .add_message_to_channel(&self.pool, channel, message_payload)
     }
 
-    fn unacked_packets_in_flight(&self) -> u16 {
-        let newest_ack = self.newest_ack.unwrap_or_default();
-        (Wrapping(self.sequence_id) - Wrapping(newest_ack)).0
+    /// How many packets we've received that an ack hasn't been seen for yet.
+    ///
+    /// This is based on a full RTT of them (implicitly) acking our acks, and represents a lower
+    /// bound used to construct the ackfield we include in packet headers.
+    ///
+    /// ie, used to decide what range of acks to send with every outbound packet.
+    fn received_unacked_packets(&self) -> u16 {
+        // calculate required ack window. inclusive range.
+        let lowest_ack = self
+            .ack_low_watermark
+            .map(|alw| (Wrapping(alw.0) + Wrapping(1)).0)
+            .unwrap_or_default();
+        let highest_ack = self.recv_buffer.sequence();
+        (Wrapping(highest_ack) - Wrapping(lowest_ack) + Wrapping(1)).0
+    }
+
+    /// How many packets have we sent that we haven't received acks for yet?
+    pub fn sent_unacked_packets(&self) -> u16 {
+        (Wrapping(self.sent_buffer.sequence()) - Wrapping(self.newest_ack.unwrap_or_default())).0
     }
 
     /// Creates a PacketHeader using the next packet sequence number, and an ack-field of recent acks.
     fn next_packet_header(&mut self) -> PacketHeader {
         self.sequence_id = self.sequence_id.wrapping_add(1);
         let id = PacketId(self.sequence_id);
-
-        let lowest_ack = if let Some(ack_low_watermark) = self.ack_low_watermark {
-            // start acks from 1 greater than the current low watermark
-            (Wrapping(ack_low_watermark.0) + Wrapping(1)).0
-        } else {
-            // brand new thing - ack from 0.
-            // TODO or... ack from the first ever received packet id? should always start at 0
-            //      i think, since new connections imply new instance of Self?
-            0
-        };
-        let highest_ack = self.recv_buffer.sequence();
-
-        let num_acks_required = (Wrapping(highest_ack) - Wrapping(lowest_ack) + Wrapping(1)).0;
-
-        assert!(
-            num_acks_required <= MAX_UNACKED_PACKETS,
-            "requires more acks than max_unacked_packets!"
-        );
+        let num_acks_required = self.received_unacked_packets();
 
         info!("Num acks required in packet id {id:?} = {num_acks_required}");
+
+        // if we have to ack more packets than the max, our ack system is broken.
+        assert!(
+            num_acks_required <= MAX_UNACKED_PACKETS,
+            "MAX_UNACKED_PACKETS breached: {num_acks_required}"
+        );
 
         let (ack_id, ack_bits) = self.recv_buffer.ack_bits();
 
@@ -262,7 +272,7 @@ impl Packeteer {
     ///
     /// A "packet" is a buffer sized at the max_packet_size, which is approx. 1200 bytes.
     fn write_packets_to_send(&mut self) -> Result<(), PacketeerError> {
-        if self.unacked_packets_in_flight() >= MAX_UNACKED_PACKETS {
+        if self.sent_unacked_packets() >= MAX_UNACKED_PACKETS {
             return Err(PacketeerError::Backpressure(Backpressure::TooManyPending));
         }
 
@@ -278,7 +288,7 @@ impl Packeteer {
             if writer.is_none() {
                 // before we allocate a new packet, ensure we aren't going to break the ack system
                 // by having too many unacked packets in-flight.
-                if self.unacked_packets_in_flight() >= MAX_UNACKED_PACKETS {
+                if self.sent_unacked_packets() >= MAX_UNACKED_PACKETS {
                     return Err(PacketeerError::Backpressure(Backpressure::TooManyPending));
                 }
                 packet = Some(self.pool.get_buffer(max_packet_size));
@@ -351,7 +361,7 @@ impl Packeteer {
     /// The packet  header contains the ack field, so it can be useful to send an empty packet
     /// just to send acks. We do this if there are no messages to send this tick.
     fn send_empty_packet(&mut self) -> Result<(), PacketeerError> {
-        if self.unacked_packets_in_flight() >= MAX_UNACKED_PACKETS {
+        if self.sent_unacked_packets() >= MAX_UNACKED_PACKETS {
             return Err(PacketeerError::Backpressure(Backpressure::TooManyPending));
         }
         let mut packet = Some(self.pool.get_buffer(1300));
@@ -379,6 +389,11 @@ impl Packeteer {
         )?;
         self.outbox.push_back(packet);
         self.stats.packets_sent += 1;
+        info!(
+            "Sent packet {:?}, acks_in_flight: {}",
+            self.sequence_id,
+            self.received_unacked_packets()
+        );
         Ok(())
     }
 
@@ -606,21 +621,32 @@ mod tests {
     //
     #[test]
     fn many_packets_in_flight() {
+        crate::test_utils::init_logger();
         // what happens if we have > 32 packets in-flight, do acks still work?
         let mut server = Packeteer::default();
         let mut client = Packeteer::default();
-        let msg = &[0x42_u8; 1100]; // one msg = one packet.
+        let msg = &[0x42_u8; 1024];
         let mut sent_ids = Vec::new();
         // Fails when sending more than 32 in flight due to ack field size?
-        for _ in 0..32 {
+        for _ in 0..MAX_UNACKED_PACKETS {
             sent_ids.push(server.send_message(0, msg).unwrap());
         }
+        // update server so it sends packets.
+        // this will make server realise it has MAX_UNACKED_PACKETS in flight, and shouldn't be able
+        // to send anything else until it sees some acks.
         server.update(1.0);
-        client.update(1.0);
-        // exchange packets
         server.drain_packets_to_send().for_each(|packet| {
             client.process_incoming_packet(packet.as_ref()).unwrap();
         });
+        info!("sent_unacked is now: {}", server.sent_unacked_packets());
+        match server.send_message(0, msg) {
+            Err(PacketeerError::Backpressure(Backpressure::TooManyPending)) => {}
+            other => panic!("Expecting backpressure, got {other:?}"),
+        }
+
+        client.update(1.0);
+        // exchange packets
+
         client.drain_packets_to_send().for_each(|packet| {
             server.process_incoming_packet(packet.as_ref()).unwrap();
         });
