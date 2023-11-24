@@ -48,7 +48,10 @@ impl IncompleteMessage {
     }
 }
 
-// us seqbuffer of enum{ in_prog(incomp msg), finished, empty} ?
+/// TODO: Need to be able to clean this up?
+/// could log (entry_time + timeout, msgid) to a queue and consume per tick, to cleanup
+/// message ids that never got fully assembled and removed.
+/// Otherwise incomplete transmission of unreliables will definitely bloat this map.
 #[derive(Default)]
 pub(crate) struct MessageReassembler {
     in_progress: HashMap<MessageId, IncompleteMessage>,
@@ -77,7 +80,15 @@ impl MessageReassembler {
 
         if ready {
             let mut incomp_msg = self.in_progress.remove(&parent_id).unwrap();
-            let ret = ReceivedMessage::new_fragmented(incomp_msg.take_fragments());
+            let ret = ReceivedMessage::new_fragmented(
+                incomp_msg
+                    .take_fragments()
+                    .into_iter()
+                    .map(|opt| {
+                        opt.expect("all fragments must exist before creating ReceivedMessage")
+                    })
+                    .collect(),
+            );
             Some(ret)
         } else {
             None

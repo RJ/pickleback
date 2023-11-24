@@ -26,8 +26,6 @@
 //! * Perhaps offer a bincoded channel of things that `impl Serialize`.
 //! * Seek feedback on design and public API.
 //! * Benchmark with and without pooled buffers.
-//! * Do we want to issue buffers for initial writing by consumers, assuming they know the size,
-//!   or are we content with copying from their temporary buffer to our pooled buffers?
 //!
 //!
 //! ### Provenance
@@ -39,6 +37,7 @@ use log::*;
 use std::{
     collections::{HashMap, VecDeque},
     io::{Cursor, Write},
+    num::Wrapping,
 };
 mod buffer_pool;
 mod channel;
@@ -52,7 +51,7 @@ mod message_reassembler;
 mod packet;
 mod received_message;
 mod sequence_buffer;
-mod test_utils;
+pub mod test_utils;
 mod tracking;
 
 use buffer_pool::*;
@@ -73,6 +72,7 @@ pub mod prelude {
     pub use super::config::PacketeerConfig;
     pub use super::error::PacketeerError;
     pub use super::jitter_pipe::JitterPipeConfig;
+    pub use super::message::MessageId;
     pub use super::received_message::ReceivedMessage;
     pub use super::tracking::PacketeerStats;
     pub use super::Packeteer;
@@ -88,6 +88,7 @@ pub struct Packeteer {
     rtt: f32,
     config: PacketeerConfig,
     sequence: u16,
+    newest_ack: Option<u16>,
     dispatcher: MessageDispatcher,
     channels: ChannelList,
     sent_buffer: SequenceBuffer<SentData>,
@@ -119,9 +120,10 @@ impl Packeteer {
             rtt: 0.0,
             config: config.clone(),
             sequence: 0,
+            newest_ack: None,
             sent_buffer: SequenceBuffer::with_capacity(config.sent_packets_buffer_size),
             recv_buffer: SequenceBuffer::with_capacity(config.received_packets_buffer_size),
-            dispatcher: MessageDispatcher::default(),
+            dispatcher: MessageDispatcher::new(&config),
             stats: PacketeerStats::default(),
             outbox: VecDeque::new(),
             channels,
@@ -138,10 +140,15 @@ impl Packeteer {
     /// Draining iterator over packets in the outbox that we need to send over the network.
     ///
     /// Call this and send packets to the other Packeteer endpoint via a network transport.
+    ///
+    /// # Panics
+    ///
+    /// If unable to write all packets, for whatever reason (for development..)
+    ///
     pub fn drain_packets_to_send(&mut self) -> std::collections::vec_deque::Drain<'_, BufHandle> {
         match self.write_packets_to_send() {
             Ok(..) => {}
-            Err(e) => warn!("{e:?}"),
+            Err(e) => panic!("error writing packets to send: {e:?}"),
         }
         self.outbox.drain(..)
     }
@@ -164,18 +171,36 @@ impl Packeteer {
 
     /// Enqueue a message to be sent in the next available packet, via a channel.
     ///
+    /// # Errors
+    ///
+    /// Can error if unable to send due to buffers being full? TODO.
+    ///
     /// # Panics
     ///
-    /// Asserts that message_payload is not longer than PacketeerConfig.max_message_size
-    pub fn send_message(&mut self, channel: u8, message_payload: &[u8]) -> MessageId {
+    /// * Asserts that message_payload is not longer than PacketeerConfig.max_message_size
+    /// * Asserts that the message_payload is non-empty
+    pub fn send_message(
+        &mut self,
+        channel: u8,
+        message_payload: &[u8],
+    ) -> Result<MessageId, PacketeerError> {
         assert!(
             message_payload.len() <= self.config.max_message_size,
             "config.max_message_size exceeded"
+        );
+        assert!(
+            !message_payload.is_empty(),
+            "message payloads must not be empty"
         );
         self.stats.message_sends += 1;
         let channel = self.channels.get_mut(channel).expect("No such channel");
         self.dispatcher
             .add_message_to_channel(&self.pool, channel, message_payload)
+    }
+
+    fn unacked_packets_in_flight(&self) -> u16 {
+        let newest_ack = self.newest_ack.unwrap_or_default();
+        (Wrapping(self.sequence) - Wrapping(newest_ack)).0
     }
 
     /// Creates a PacketHeader using the next packet sequence number, and an ack-field of recent acks.
@@ -214,6 +239,11 @@ impl Packeteer {
 
         while self.channels.any_with_messages_to_send() {
             if writer.is_none() {
+                assert!(
+                    self.unacked_packets_in_flight() < 32,
+                    "can't create new packet - too many in-flight: {}",
+                    self.unacked_packets_in_flight()
+                );
                 packet = Some(self.pool.get_buffer(max_packet_size));
                 let cur = Cursor::new(packet.as_mut().unwrap().as_mut());
                 writer = Some(BufferLimitedWriter::new(cur, max_packet_size));
@@ -330,9 +360,9 @@ impl Packeteer {
     /// * Can return a PacketeerError::Io if parsing packet headers or messages fails.
     /// * Can return PacketeerError::StalePacket
     /// /// * Can return PacketeerError::DuplicatePacket
-    pub fn process_incoming_packet(&mut self, buffer: BufHandle) -> Result<(), PacketeerError> {
+    pub fn process_incoming_packet(&mut self, packet: &[u8]) -> Result<(), PacketeerError> {
         self.stats.packets_received += 1;
-        let mut reader = Cursor::new(buffer.as_ref());
+        let mut reader = Cursor::new(packet);
         let header: PacketHeader = PacketHeader::parse(&mut reader)?;
         log::trace!(
             "<<< Receiving packet seq:{} ack:{} ack_bits:{:#0b}",
@@ -353,7 +383,7 @@ impl Packeteer {
             return Err(PacketeerError::DuplicatePacket);
         }
         self.recv_buffer.insert(
-            RecvData::new(self.time, self.config.packet_header_size + buffer.len()),
+            RecvData::new(self.time, self.config.packet_header_size + packet.len()),
             header.sequence(),
         )?;
         self.process_packet_acks_and_rtt(&header);
@@ -365,12 +395,13 @@ impl Packeteer {
     /// Parses Messages from packet payload and delivers them to the dispatcher
     fn process_packet_messages(
         &mut self,
-        reader: &mut Cursor<&Vec<u8>>,
+        reader: &mut Cursor<&[u8]>,
     ) -> Result<(), PacketeerError> {
         while reader.remaining() > 0 {
             // as long as there are bytes left to read, we should only find whole messages
             let msg = Message::parse(&self.pool, reader)?;
             self.stats.messages_received += 1;
+            info!("Parsed from packet: {msg:?}");
             if let Some(channel) = self.channels.get_mut(msg.channel()) {
                 if channel.accepts_message(&msg) {
                     self.dispatcher.process_received_message(msg);
@@ -389,12 +420,26 @@ impl Packeteer {
         // walk the ack bit field, and for any ack not already seen, we inform the dispatcher
         // so that it can ack all messages associated with that packet sequence number.
         let mut ack_bits = header.ack_bits();
+        // log::info!(
+        //     "Processing ack_bits = {ack_bits:#032b} seq: {}",
+        //     header.ack()
+        // );
         for i in 0..32 {
+            let ack_sequence = header.ack().wrapping_sub(i);
             if ack_bits & 1 != 0 {
-                let ack_sequence = header.ack().wrapping_sub(i);
-
                 if let Some(sent_data) = self.sent_buffer.get_mut(ack_sequence) {
                     if !sent_data.acked {
+                        // log::info!("{ack_sequence} NEW ACK");
+                        if let Some(newest_ack) = self.newest_ack.as_mut() {
+                            if SequenceBuffer::<u16>::sequence_greater_than(
+                                ack_sequence,
+                                *newest_ack,
+                            ) {
+                                *newest_ack = ack_sequence;
+                            }
+                        } else {
+                            self.newest_ack = Some(ack_sequence);
+                        }
                         // new ack!
                         self.stats.packets_acked += 1;
                         sent_data.acked = true;
@@ -409,7 +454,11 @@ impl Packeteer {
                             self.rtt =
                                 self.rtt + ((rtt - self.rtt) * self.config.rtt_smoothing_factor);
                         }
+                    } else {
+                        // log::info!("{ack_sequence} ACK (already seen)");
                     }
+                } else {
+                    // log::warn!("{ack_sequence} ACK.. but not in sent data??");
                 }
             }
             ack_bits >>= 1;
@@ -467,7 +516,7 @@ mod tests {
         assert_eq!(to_send.len(), 1);
 
         info!("Sending first copy of packet");
-        assert!(client.process_incoming_packet(to_send[0].clone()).is_ok());
+        assert!(client.process_incoming_packet(to_send[0].as_ref()).is_ok());
 
         let rec = client.drain_received_messages(0).next().unwrap();
         assert_eq!(rec.channel(), 0);
@@ -476,12 +525,47 @@ mod tests {
 
         // send dupe
         info!("Sending second (dupe) copy of packet");
-        match client.process_incoming_packet(to_send[0].clone()) {
+        match client.process_incoming_packet(to_send[0].as_ref()) {
             Err(PacketeerError::DuplicatePacket) => {}
             e => {
                 panic!("Should be dupe packet error, got: {:?}", e);
             }
         }
+    }
+
+    // if you send a 33kB message, it will be fragmented over 33 packets and all sent
+    // at once. This is a problem, since the ackfield is only 32 bits - so can only ack up to
+    // 32 previous messages.
+    //
+    // Perhaps i want an arbitrary length bitmask varint style with a continuation bit?
+    // we kinda want to optimise for fewer acks in flight anyway.
+    //
+    // maybe if the 4th octet of acks is used, it uses 1 bit for continuation like varint?
+    // so the bitfield can extend indefinitely.
+    //
+    #[test]
+    fn many_packets_in_flight() {
+        // what happens if we have > 32 packets in-flight, do acks still work?
+        let mut server = Packeteer::default();
+        let mut client = Packeteer::default();
+        let msg = &[0x42_u8; 1100]; // one msg = one packet.
+        let mut sent_ids = Vec::new();
+        // Fails when sending more than 32 in flight due to ack field size?
+        for _ in 0..32 {
+            sent_ids.push(server.send_message(0, msg).unwrap());
+        }
+        server.update(1.0);
+        client.update(1.0);
+        // exchange packets
+        server.drain_packets_to_send().for_each(|packet| {
+            client.process_incoming_packet(packet.as_ref()).unwrap();
+        });
+        client.drain_packets_to_send().for_each(|packet| {
+            server.process_incoming_packet(packet.as_ref()).unwrap();
+        });
+
+        assert_eq!(sent_ids.len(), client.drain_received_messages(0).len());
+        assert_eq!(sent_ids.len(), server.drain_message_acks(0).len());
     }
 
     #[test]
@@ -507,7 +591,7 @@ mod tests {
 
             // forward packets to their endpoints
             server.drain_packets_to_send().for_each(|packet| {
-                client.process_incoming_packet(packet).unwrap();
+                client.process_incoming_packet(packet.as_ref()).unwrap();
                 assert_eq!(
                     test_data,
                     client
@@ -520,7 +604,7 @@ mod tests {
             });
             assert!(!server.has_packets_to_send());
             client.drain_packets_to_send().for_each(|packet| {
-                server.process_incoming_packet(packet).unwrap();
+                server.process_incoming_packet(packet.as_ref()).unwrap();
                 assert_eq!(
                     test_data,
                     server
@@ -565,7 +649,6 @@ mod tests {
 
         ////
 
-        // buffer.reset();
         buffer = SequenceBuffer::<TestData>::with_capacity(TEST_BUFFER_SIZE);
 
         for ack in [1, 5, 9, 11].iter() {
@@ -647,7 +730,7 @@ mod tests {
         let write_packet = PacketHeader::new(write_sequence, write_ack, write_ack_bits);
         write_packet.write(&mut cur).unwrap();
 
-        let mut reader = Cursor::new(&buffer);
+        let mut reader = Cursor::new(buffer.as_ref());
         let read_packet = PacketHeader::parse(&mut reader).unwrap();
 
         assert_eq!(write_packet.sequence(), read_packet.sequence());
@@ -664,9 +747,9 @@ mod tests {
         let msg1 = b"Hello";
         let msg2 = b"world";
         let msg3 = b"!";
-        let id1 = harness.server.send_message(channel, msg1);
-        let id2 = harness.server.send_message(channel, msg2);
-        let id3 = harness.server.send_message(channel, msg3);
+        let id1 = harness.server.send_message(channel, msg1).unwrap();
+        let id2 = harness.server.send_message(channel, msg2).unwrap();
+        let id3 = harness.server.send_message(channel, msg3).unwrap();
 
         harness.advance(0.1);
 
@@ -698,7 +781,7 @@ mod tests {
         msg.extend_from_slice(&[66; 1024]);
         msg.extend_from_slice(&[67; 100]);
 
-        let msg_id = harness.server.send_message(channel, msg.as_ref());
+        let msg_id = harness.server.send_message(channel, msg.as_ref()).unwrap();
 
         harness.advance(0.1);
 
@@ -742,42 +825,6 @@ mod tests {
         assert_eq!(harness.client.drain_received_messages(channel).len(), 1);
     }
 
-    // TODO this isn't testing having multiple messages in flight yet? batch the sending and receiving?
-    #[test]
-    fn soak_message_transmission() {
-        crate::test_utils::init_logger();
-        let channel = 0;
-        let mut harness = TestHarness::new(JitterPipeConfig::disabled());
-
-        // TODO crashes when msg id rolls around
-        for _ in 0..1000 {
-            let size = rand::random::<u32>() % (1024 * 16);
-            let msg = random_payload(size);
-            let msg_id = harness.server.send_message(channel, msg.as_ref());
-            info!("💌 Sending message of size {size}, msg_id: {msg_id}");
-
-            harness.advance(0.03);
-
-            let client_received_messages = harness
-                .client
-                .drain_received_messages(channel)
-                .collect::<Vec<_>>();
-            assert_eq!(client_received_messages.len(), 1);
-            assert_eq!(
-                client_received_messages[0].payload_to_owned().as_slice(),
-                msg
-            );
-
-            assert_eq!(
-                vec![msg_id],
-                harness
-                    .server
-                    .drain_message_acks(channel)
-                    .collect::<Vec<_>>()
-            );
-        }
-    }
-
     // test what happens in a reliable channel when one of the fragments isn't delivered.
     // should resend after a suitable amount of time.
     #[test]
@@ -786,7 +833,10 @@ mod tests {
         let mut harness = TestHarness::new(JitterPipeConfig::disabled());
         // big enough to require 2 packets
         let payload = random_payload(1800);
-        let id = harness.server.send_message(channel, payload.as_ref());
+        let id = harness
+            .server
+            .send_message(channel, payload.as_ref())
+            .unwrap();
         // drop second packet (index 1), which will be the second of the two fragments.
         harness.advance_with_server_outbound_drops(0.05, vec![1]);
         assert!(harness.collect_client_messages(channel).is_empty());
@@ -806,56 +856,5 @@ mod tests {
         assert_eq!(1, to_send.len());
         // both our fragments are def bigger than 50:
         assert!(to_send[0].len() < 50);
-    }
-
-    const NUM_TEST_MSGS: usize = 1000;
-    // extras are to ensure and resends / acks actually can be retransmitted
-    const NUM_EXTRA_ITERATIONS: usize = 100;
-
-    #[test]
-    fn soak_message_transmission_with_jitter_pipe() {
-        crate::test_utils::init_logger();
-        let channel = 1;
-        let mut harness = TestHarness::new(JitterPipeConfig::terrible());
-
-        let mut test_msgs = Vec::new();
-        (0..NUM_TEST_MSGS)
-            .for_each(|_| test_msgs.push(random_payload(rand::random::<u32>() % (1024 * 16))));
-
-        let mut unacked_sent_msg_ids = Vec::new();
-
-        let mut client_received_messages = Vec::new();
-
-        for i in 0..(NUM_TEST_MSGS + NUM_EXTRA_ITERATIONS) {
-            if let Some(msg) = test_msgs.get(i) {
-                let size = msg.len();
-                let msg_id = harness.server.send_message(channel, msg.as_ref());
-                info!("💌💌 Sending message {i}/{NUM_TEST_MSGS}, size {size},  msg_id: {msg_id}");
-                unacked_sent_msg_ids.push(msg_id);
-            }
-
-            let stats = harness.advance(0.051);
-            info!("{stats:?}");
-
-            let acked_ids = harness.collect_server_acks(channel);
-            if !acked_ids.is_empty() {
-                unacked_sent_msg_ids.retain(|id| !acked_ids.contains(id));
-                info!(
-                    "👍 Server got ACKs: {acked_ids:?} still need: {} : {unacked_sent_msg_ids:?}",
-                    unacked_sent_msg_ids.len()
-                );
-            }
-
-            client_received_messages.extend(harness.client.drain_received_messages(channel));
-        }
-
-        assert_eq!(
-            Vec::<MessageId>::new(),
-            unacked_sent_msg_ids,
-            "server is missing acks for these messages"
-        );
-
-        // with enough extra iterations, resends should have ensured everything was received.
-        assert_eq!(client_received_messages.len(), test_msgs.len());
     }
 }

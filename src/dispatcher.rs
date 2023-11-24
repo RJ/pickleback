@@ -19,29 +19,26 @@ impl MessageHandle {
 pub(crate) struct MessageDispatcher {
     next_message_id: MessageId,
     sent_frag_map: SentFragMap,
-    messages_in_packets: SequenceBuffer<Vec<MessageHandle>>, // HashMap<SentHandle, Vec<MessageHandle>>,
+    messages_in_packets: SequenceBuffer<Vec<MessageHandle>>,
     message_reassembler: MessageReassembler,
     message_inbox: smallmap::Map<u8, Vec<ReceivedMessage>>,
     ack_inbox: smallmap::Map<u8, Vec<MessageId>>,
 }
 
-impl Default for MessageDispatcher {
-    fn default() -> Self {
+impl MessageDispatcher {
+    pub(crate) fn new(config: &PacketeerConfig) -> Self {
         Self {
             next_message_id: 0,
-            sent_frag_map: SentFragMap::default(),
-            messages_in_packets: SequenceBuffer::with_capacity(10000), // TODO how many unaccounted for packets do we support?
+            sent_frag_map: SentFragMap::with_capacity(config.sent_frag_map_size),
+            messages_in_packets: SequenceBuffer::with_capacity(config.received_packets_buffer_size),
             message_reassembler: MessageReassembler::default(),
             message_inbox: smallmap::Map::default(),
             ack_inbox: smallmap::Map::default(),
         }
     }
-}
-
-impl MessageDispatcher {
     // pass in msgs parsed from received network packets.
     pub(crate) fn process_received_message(&mut self, msg: Message) {
-        info!("Dispatcher::process_received_message: {msg:?}");
+        trace!("Dispatcher::process_received_message: {msg:?}");
         let received_msg = if msg.fragment().is_none() {
             Some(ReceivedMessage::new_single(msg))
         } else {
@@ -76,6 +73,7 @@ impl MessageDispatcher {
         packet_handle: SentHandle,
         message_handles: Vec<MessageHandle>,
     ) -> Result<(), PacketeerError> {
+        info!(">>> {packet_handle:?} CONTAINS msg ids: {message_handles:?}");
         self.messages_in_packets
             .insert(message_handles, packet_handle.0)?;
         Ok(())
@@ -128,11 +126,11 @@ impl MessageDispatcher {
         pool: &BufPool,
         channel: &mut Box<dyn Channel>,
         payload: &[u8],
-    ) -> MessageId {
+    ) -> Result<MessageId, PacketeerError> {
         if payload.len() <= 1024 {
             let id = self.next_message_id();
             channel.enqueue_message(pool, id, payload, Fragmented::No);
-            id
+            Ok(id)
         } else {
             self.add_large_message_to_channel(pool, channel, payload)
         }
@@ -143,7 +141,7 @@ impl MessageDispatcher {
         pool: &BufPool,
         channel: &mut Box<dyn Channel>,
         payload: &[u8],
-    ) -> MessageId {
+    ) -> Result<MessageId, PacketeerError> {
         assert!(payload.len() > 1024);
         // all fragments use the same message id.
         let full_payload_size = payload.len();
@@ -181,8 +179,8 @@ impl MessageDispatcher {
             channel.enqueue_message(pool, id, frag_payload, Fragmented::Yes(fragment));
         }
         self.sent_frag_map
-            .insert_fragmented_message(parent_id, frag_ids);
-        parent_id
+            .insert_fragmented_message(parent_id, frag_ids)?;
+        Ok(parent_id)
     }
 
     fn next_message_id(&mut self) -> MessageId {
@@ -193,7 +191,7 @@ impl MessageDispatcher {
 }
 
 #[derive(Default, Clone, PartialEq)]
-enum FragAckStatus {
+pub(crate) enum FragAckStatus {
     #[default]
     Unknown,
     Complete,
@@ -201,28 +199,27 @@ enum FragAckStatus {
     Partial(Vec<MessageId>),
 }
 
-/// tracks the unacked message ids assigned to fragments of a larger message id.
-/// they're removed as they are acked & once depleted, the original parent message id is acked.
-
+/// SendFragMap tracks the unacked message ids assigned to fragments of a larger message id we sent.
+/// They're removed as they are acked & once depleted, the original parent message id is acked.
 pub struct SentFragMap {
     m: SequenceBuffer<FragAckStatus>,
-    // m: HashMap<MessageId, Vec<u16>>,
 }
-impl Default for SentFragMap {
-    fn default() -> Self {
+
+impl SentFragMap {
+    pub(crate) fn with_capacity(size: usize) -> Self {
         Self {
-            m: SequenceBuffer::with_capacity(1000),
+            m: SequenceBuffer::with_capacity(size),
         }
     }
-}
-impl SentFragMap {
-    pub fn insert_fragmented_message(&mut self, id: MessageId, fragment_ids: Vec<u16>) {
-        let _ = self.m.insert(FragAckStatus::Partial(fragment_ids), id);
-        // let res = self.m.insert(id, fragment_ids);
-        // assert!(
-        //     res.is_none(),
-        //     "why are we overwriting something in the fragmap?"
-        // );
+    pub(crate) fn insert_fragmented_message(
+        &mut self,
+        id: MessageId,
+        fragment_ids: Vec<u16>,
+    ) -> Result<(), PacketeerError> {
+        match self.m.insert(FragAckStatus::Partial(fragment_ids), id) {
+            Ok(_) => Ok(()),
+            Err(e) => Err(e),
+        }
     }
     /// returns true if parent message is whole/acked.
     pub fn ack_fragment_message(&mut self, parent_id: MessageId, fragment_id: MessageId) -> bool {
@@ -231,24 +228,22 @@ impl SentFragMap {
         };
         let ret = match entry {
             FragAckStatus::Complete => {
-                info!("Message {parent_id} already completed arrived.");
+                trace!("Message {parent_id} already completed arrived.");
                 false
             }
             FragAckStatus::Unknown => {
-                info!("Message {parent_id} unknown to frag map");
+                warn!("Message {parent_id} unknown to frag map");
                 false
             }
             FragAckStatus::Partial(ref mut remaining) => {
                 remaining.retain(|id| *id != fragment_id);
-                //  Remaining fragment indexs for parent 841, fragment_id=1 = [841, 842, 843, 844, 845, 846, 847, 848, 849, 850, 851, 852, 853]
-                // oops, am i using msg ids or fragment indexes for this?
                 info!("Remaining fragment indexs for parent {parent_id}, fragment_id={fragment_id} = {remaining:?}");
                 remaining.is_empty()
             }
         };
         if ret {
             self.m.insert(FragAckStatus::Complete, parent_id).unwrap();
-            info!("Message fully acked, all fragments accounted for {parent_id}");
+            trace!("Message fully acked, all fragments accounted for {parent_id}");
         }
         ret
     }

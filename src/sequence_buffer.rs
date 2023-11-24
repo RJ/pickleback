@@ -141,6 +141,13 @@ where
     }
 
     pub fn ack_bits(&self) -> (u16, u32) {
+        /*
+           TODO 2Do we know the lower bound of packets we need to bother acking?
+           in theory we know the range of acks we acked in a packet we sent, and we know if
+           our sent packet is acked, so we can move an ack low-watermark accordingly?
+
+           then varint continuation style on the 4th+ byte and return a Vec<u8> here?
+        */
         let ack = self.sequence;
         let mut ack_bits: u32 = 0;
         let mut mask: u32 = 1;
