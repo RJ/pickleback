@@ -57,7 +57,7 @@ assert_eq!(received.len(), 1);
 let recv_payload = received[0].payload_to_owned();
 assert_eq!(b"hello".to_vec(), recv_payload);
 
-// even thought the client doesn't have a message payload to send, it will send
+// if the client doesn't have a message payload to send, it will still send
 // an empty packet here just to transmit acks
 client.update(1.0);
 client.drain_packets_to_send().for_each(|packet| {
@@ -65,7 +65,7 @@ client.drain_packets_to_send().for_each(|packet| {
     server.process_incoming_packet(packet.as_ref()).unwrap();
 });
 
-// now the client has sent packets, the server will have received an ack
+// now the client has sent packets to the server, the server will have received an ack
 assert_eq!(vec![msg_id], server.drain_message_acks(channel).collect::<Vec<_>>());
 ```
 
