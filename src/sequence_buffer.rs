@@ -1,4 +1,4 @@
-use crate::{tracking::RecvData, PacketeerError};
+use crate::PacketeerError;
 use std::num::Wrapping;
 
 pub struct SequenceBuffer<T>
@@ -138,34 +138,6 @@ where
     #[allow(unused)]
     pub fn capacity(&self) -> usize {
         self.entries.capacity()
-    }
-
-    /// Generate the ack bitfield.
-    ///
-    /// Starting with the largest sequence inserted, work backwards and mask in a 1 if the
-    /// sequence - 1 packet has been received. (ie, we want to ack it)
-    ///
-    /// Any gaps in the sequence numbers, ie missing entries, result in 0 bits in ack bitfield.
-    pub fn ack_bits(&self) -> (u16, u32) {
-        /*
-           TODO 2Do we know the lower bound of packets we need to bother acking?
-           in theory we know the range of acks we acked in a packet we sent, and we know if
-           our sent packet is acked, so we can move an ack low-watermark accordingly?
-
-           then varint continuation style on the 4th+ byte and return a Vec<u8> here?
-        */
-        let ack = self.sequence;
-        let mut ack_bits: u32 = 0;
-        let mut mask: u32 = 1;
-        for i in 0..33 {
-            let sequence = (Wrapping(ack) - Wrapping(i as u16)).0;
-            if self.exists(sequence) {
-                ack_bits |= mask;
-            }
-
-            mask <<= 1;
-        }
-        (self.sequence, ack_bits)
     }
 
     #[inline]

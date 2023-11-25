@@ -1,50 +1,3 @@
-///
-/// ### Message header
-///
-/// Packet payloads consist of multiple Messages.
-/// Messages are prefixed by a message header.
-///
-/// ### Small flag
-///
-/// * For non-frag msgs, payload size is a u8 (<256 byte msgs)
-/// * for frags, number of fragments, and also fragment id, uses u8 (256kB payloads)
-///
-/// ### Large flag
-/// * For frag msgs, payload size uses 2 bytes, a u16 (can fill packet, up to ~1024B)
-/// * for frags, number of fragments, and also fragment id, uses u16 (65,536 * 1kB = loads)
-///
-///
-/// `MessagePrefixByte`
-/// | bits       |          | description                            |
-/// | ---------- | -------- | -------------------------------------- |
-/// | `-------X` | `<< 0`   | X = 0 non-fragmented. X = 1 fragmented |
-/// | `------X-` | `<< 1`   | X = 0 small flag, X = 1 large flag     |
-/// | `XXXXXX--` | `<< 2-7` | channel number 2^6 = 64 channels       |
-///
-/// ## Non-fragmented Message
-///
-/// | bytes  | type       | description                                                                     |
-/// | ------ | ---------- | ------------------------------------------------------------------------------- |
-/// | 1      | `u8`       | `MessagePrefixByte`                                                             |
-/// | 1 or 2 | `u8`/`u16` | Payload Length, 1 or 2 bytes, depending on `MessagePrefixByte` small/large flag |
-/// | ...    | Payload    |                                                                                 |
-///
-/// ## Fragmented Message
-///
-/// need to take care with multiple frag groups in flight - ensure no overlap or we get old frags..
-/// also can probably pack frag group, id, num frags more concisely.
-///
-/// Because message ids are issued sequentially, you can always calculate the parent message id
-/// of a fragment by subtracting the fragment index from the message id.
-///
-/// | bytes  | type          | description                                              |
-/// | ------ | ------------- | -------------------------------------------------------- |
-/// | 1      | `u8`          | `MessagePrefixByte`                                      |
-/// | 1 or 2 | `u8` or `u16` | fragment index, depending on small/large flag               |
-/// | 1 or 2 | `u8` or `u16` | num fragments, depending on small/large flag             |
-/// | 2      | `u16`         | Payload Length, only on last fragment_id. Rest are 1024. |
-/// | ..     | Payload       |                                                          |
-///
 use crate::{
     buffer_pool::{BufHandle, BufPool},
     cursor::CursorExtras,
@@ -53,9 +6,9 @@ use crate::{
 use byteorder::{NetworkEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{Cursor, Read, Write};
 
-/// A Message, once sent, is identified by a MessageId (a `u16`). Use to check for acks later.
+/// A Message, once sent, is identified by a MessageId. Use to check for acks later.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, Default)]
-pub struct MessageId(pub u16);
+pub struct MessageId(pub(crate) u16);
 
 #[derive(Debug, Clone)]
 pub(crate) struct Fragment {
@@ -220,12 +173,6 @@ impl Message {
         }
     }
 
-    // writes the buffer to the writer
-    // pub(crate) fn write(&self, mut writer: impl std::io::Write) -> Result<(), PacketeerError> {
-    //     writer.write_all(self.buffer())?;
-    //     Ok(())
-    // }
-
     pub(crate) fn header_size(fragmented: &Fragmented, size_mode: MessageSizeMode) -> usize {
         // prefix byte
         1 +
@@ -261,35 +208,30 @@ impl Message {
     }
 
     pub fn size(&self) -> usize {
+        let (is_fragment, is_last_fragment) = if let Some(frag) = self.fragment.as_ref() {
+            (true, frag.is_last())
+        } else {
+            (false, false)
+        };
         self.buffer.len()
             + 1
-            + match (self.fragment.is_some(), self.size_mode) {
+            + match (is_fragment, self.size_mode) {
                 // small unfragmented
                 (false, MessageSizeMode::Small) => 1,
                 // large unfragmented
                 (false, MessageSizeMode::Large) => 2,
                 // small fragmented
-                (true, MessageSizeMode::Small) => {
-                    3 + if self.fragment.as_ref().unwrap().is_last() {
-                        2
-                    } else {
-                        0
-                    }
-                }
+                (true, MessageSizeMode::Small) if is_last_fragment => 5,
+                (true, MessageSizeMode::Small)  => 3,
                 // large fragmented
-                (true, MessageSizeMode::Large) => {
-                    5 + if self.fragment.as_ref().unwrap().is_last() {
-                        2
-                    } else {
-                        0
-                    }
-                }
+                (true, MessageSizeMode::Large) if is_last_fragment => 7,
+                (true, MessageSizeMode::Large)  => 5,
             }
-            // add message id: TODO u16 for now
+            // add message id u16
+            // TODO (encode as delta to prev msg id?)
             +  2
     }
 
-    // TODO check reminaing and error if writes will panic
     pub(crate) fn write_headers(
         mut writer: impl std::io::Write,
         id: MessageId,
@@ -368,10 +310,7 @@ impl Message {
 
 #[cfg(test)]
 mod tests {
-
     use super::*;
-    // explicit import to override bevy
-    // use log::{debug, error, info, trace, warn};
 
     #[test]
     fn message_serialization() {
