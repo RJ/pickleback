@@ -91,8 +91,8 @@ impl Packeteer {
     /// since the game started. You'll be updating this with a `dt` every tick, via `update()`.
     pub fn new(config: PacketeerConfig, time: f64) -> Self {
         let mut channels = ChannelList::default();
-        channels.insert(Box::new(UnreliableChannel::new(0, time)));
-        channels.insert(Box::new(ReliableChannel::new(1, time)));
+        channels.insert(Channel::from(UnreliableChannel::new(0, time)));
+        channels.insert(Channel::from(ReliableChannel::new(1, time)));
         Self {
             time,
             rtt: 0.0,
@@ -281,7 +281,7 @@ impl Packeteer {
 
             while let Some(channel) = self.channels.all_non_empty_mut().next() {
                 match Self::write_channel_messages_to_packet(
-                    channel.as_mut(),
+                    channel,
                     writer.as_mut().unwrap(),
                     &mut message_handles_in_packet,
                 )? {
@@ -318,7 +318,7 @@ impl Packeteer {
     ///
     /// Returns number of messages written.
     fn write_channel_messages_to_packet(
-        channel: &mut dyn Channel,
+        channel: &mut Channel,
         cursor: &mut BufferLimitedWriter,
         message_handles: &mut Vec<MessageHandle>,
     ) -> Result<usize, PacketeerError> {
