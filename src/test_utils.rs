@@ -87,12 +87,14 @@ impl TestHarness {
     /// advances time, then advances the server first, then client.
     /// Transmits S2C and C2S messages via configured jitter pipes.
     pub fn advance(&mut self, dt: f64) -> TransmissionStats {
-        info!("---- tick server.time --> {} ----", self.server.time + dt);
+        info!("🟡 server.update({dt}) --> {} ----", self.server.time + dt);
         self.server.update(dt);
+        info!("🟠 client.update({dt}) --> {} ----", self.server.time + dt);
         self.client.update(dt);
         let empty = Vec::new();
         let server_drop_indices = self.server_drop_indices.as_ref().unwrap_or(&empty);
 
+        info!("🟡 server -> compose and send packets");
         let server_sent = self
             .server
             .drain_packets_to_send()
@@ -103,17 +105,20 @@ impl TestHarness {
                 acc + 1
             });
 
+        info!("🟠 client -> process incoming packets");
         let mut client_received = 0;
         while let Some(p) = self.server_jitter_pipe.take_next() {
             client_received += 1;
             self.client.process_incoming_packet(p.as_ref());
         }
 
+        info!("🟠 client -> compose and send packets");
         let client_sent = self.client.drain_packets_to_send().fold(0, |acc, packet| {
             self.client_jitter_pipe.insert(packet);
             acc + 1
         });
 
+        info!("🟡 server -> process incoming packets");
         let mut server_received = 0;
         while let Some(p) = self.client_jitter_pipe.take_next() {
             server_received += 1;

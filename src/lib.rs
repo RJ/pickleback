@@ -39,6 +39,7 @@ use std::{
     io::{Cursor, Write},
     num::Wrapping,
 };
+mod ack_header;
 mod buffer_pool;
 mod channel;
 mod config;
@@ -54,6 +55,7 @@ mod sequence_buffer;
 pub mod test_utils;
 mod tracking;
 
+use ack_header::*;
 use buffer_pool::*;
 use channel::*;
 use config::*;
@@ -221,13 +223,19 @@ impl Packeteer {
     ///
     /// ie, used to decide what range of acks to send with every outbound packet.
     fn received_unacked_packets(&self) -> u16 {
-        // calculate required ack window. inclusive range.
-        let lowest_ack = self
-            .ack_low_watermark
-            .map(|alw| (Wrapping(alw.0) + Wrapping(1)).0)
-            .unwrap_or_default();
-        let highest_ack = self.recv_buffer.sequence();
-        (Wrapping(highest_ack) - Wrapping(lowest_ack) + Wrapping(1)).0
+        if let Some(lowest_ack) = self.ack_low_watermark {
+            (Wrapping(self.recv_buffer.sequence()) - Wrapping(lowest_ack.0)).0
+        } else {
+            // nothing has been acked yet, so everything?
+            self.recv_buffer.sequence()
+        }
+        // // calculate required ack window. inclusive range.
+        // let lowest_ack = self
+        //     .ack_low_watermark
+        //     .map(|alw| alw.0) //(Wrapping(alw.0) + Wrapping(1)).0)
+        //     .unwrap_or_default();
+        // let highest_ack = self.recv_buffer.sequence();
+        // (Wrapping(highest_ack) - Wrapping(lowest_ack) + Wrapping(1)).0
     }
 
     /// How many packets have we sent that we haven't received acks for yet?
@@ -243,25 +251,28 @@ impl Packeteer {
 
         info!("Num acks required in packet id {id:?} = {num_acks_required}");
 
-        if num_acks_required >= MAX_UNACKED_PACKETS {
+        if num_acks_required > MAX_UNACKED_PACKETS {
             return Err(PacketeerError::Backpressure(Backpressure::TooManyPending));
         }
-
-        let ack_iter = AckIter::with_length(&self.recv_buffer, 32);
-        // let (ack_id, ack_bits) = self.recv_buffer.ack_bits();
-        let ret = PacketHeader::new(id, ack_iter);
-        // info!("Original ack_id: {ack_id}, ack_bits = {ack_bits:#032b}");
-        Ok(ret)
+        if num_acks_required == 0 {
+            Ok(PacketHeader::new_no_acks(id)?)
+        } else {
+            let ack_iter = AckIter::with_minimum_length(&self.recv_buffer, num_acks_required);
+            let ret = PacketHeader::new(id, ack_iter, num_acks_required)?;
+            // let (ack_id, ack_bits) = self.recv_buffer.ack_bits();
+            // info!("Original ack_id: {ack_id}, ack_bits = {ack_bits:#032b}");
+            info!("Packetheader: {ret:?}");
+            Ok(ret)
+        }
     }
 
     /// Calls `next_packet_header()` and writes it to the provided cursor, returning the bytes written
     fn write_packet_header(&mut self, cursor: &mut impl Write) -> Result<usize, PacketeerError> {
         let header = self.next_packet_header()?;
         debug!(
-            ">>> Sending packet id:{:?} ack_id:{:?} ack_bits:{:#0b}",
+            ">>> Sending packet id:{:?} ack_id:{:?}",
             header.id(),
             header.ack_id(),
-            header.ack_bits()
         );
         header.write(cursor)?;
         Ok(header.size())
@@ -271,6 +282,7 @@ impl Packeteer {
     /// packet headers written. Place into outbox for eventual sending over the network.
     ///
     /// A "packet" is a buffer sized at the max_packet_size, which is approx. 1200 bytes.
+    /// name: compose_packets?
     fn write_packets_to_send(&mut self) -> Result<(), PacketeerError> {
         if self.sent_unacked_packets() >= MAX_UNACKED_PACKETS {
             return Err(PacketeerError::Backpressure(Backpressure::TooManyPending));
@@ -427,10 +439,9 @@ impl Packeteer {
         let mut reader = Cursor::new(packet);
         let header: PacketHeader = PacketHeader::parse(&mut reader)?;
         log::trace!(
-            "<<< Receiving packet id:{:?} ack_id:{:?} ack_bits:{:#0b}",
+            "<<< Receiving packet id:{:?} ack_id:{:?}",
             header.id(),
             header.ack_id(),
-            header.ack_bits()
         );
         // if this packet sequence is out of range, reject as stale
         if !self.recv_buffer.check_sequence(header.id().0) {
@@ -479,65 +490,52 @@ impl Packeteer {
     /// ack the message ids associated with the packet sequence nunmber.
     /// Updates rtt calculations.
     fn process_packet_acks_and_rtt(&mut self, header: &PacketHeader) {
-        // walk the ack bit field, and for any ack not already seen, we inform the dispatcher
-        // so that it can ack all messages associated with that packet sequence number.
-        let mut ack_bits = header.ack_bits();
-        // log::info!(
-        //     "Processing ack_bits = {ack_bits:#032b} seq: {}",
-        //     header.ack()
-        // );
-        for i in 0..32 {
-            let ack_sequence = header.ack_id().0.wrapping_sub(i);
-            if ack_bits & 1 != 0 {
-                if let Some(sent_data) = self.sent_buffer.get_mut(ack_sequence) {
-                    if !sent_data.acked {
-                        // Tracking newest ack we've seen, so we know how many packets are unacked
-                        // or still in flight.
-                        if let Some(newest_ack) = self.newest_ack.as_mut() {
-                            if SequenceBuffer::<u16>::sequence_greater_than(
-                                ack_sequence,
-                                *newest_ack,
-                            ) {
-                                *newest_ack = ack_sequence;
-                            }
-                        } else {
-                            self.newest_ack = Some(ack_sequence);
-                        }
-                        // SentData stores which of their packets we acked up to in our packet,
-                        // so we can now potentially move our ack low-watermark up.
-                        // ie, they have effectively acked our acks up to this point.
-                        if let Some(lowest_ack) = self.ack_low_watermark {
-                            if SequenceBuffer::<u16>::sequence_greater_than(
-                                sent_data.acked_up_to.0,
-                                lowest_ack.0,
-                            ) {
-                                self.ack_low_watermark = Some(sent_data.acked_up_to);
-                            }
-                        } else {
-                            self.ack_low_watermark = Some(sent_data.acked_up_to);
-                        }
-                        //
-                        self.stats.packets_acked += 1;
-                        sent_data.acked = true;
-                        // this allows the dispatcher to ack the messages that were sent in this packet
-                        self.dispatcher
-                            .acked_packet(PacketId(ack_sequence), &mut self.channels);
-                        // update rtt calculations
-                        let rtt: f32 = (self.time - sent_data.time) as f32 * 1000.0;
-                        if (self.rtt == 0.0 && rtt > 0.0) || (self.rtt - rtt).abs() < 0.00001 {
-                            self.rtt = rtt;
-                        } else {
-                            self.rtt =
-                                self.rtt + ((rtt - self.rtt) * self.config.rtt_smoothing_factor);
+        let Some(ack_iter) = header.ack_header().map(|header| header.into_iter()) else {
+            return;
+        };
+        for (ack_sequence, is_acked) in ack_iter {
+            if !is_acked {
+                continue;
+            }
+            if let Some(sent_data) = self.sent_buffer.get_mut(ack_sequence) {
+                if !sent_data.acked {
+                    // Tracking newest ack we've seen, so we know how many packets are unacked
+                    // or still in flight.
+                    if let Some(newest_ack) = self.newest_ack.as_mut() {
+                        if SequenceBuffer::<u16>::sequence_greater_than(ack_sequence, *newest_ack) {
+                            *newest_ack = ack_sequence;
                         }
                     } else {
-                        // log::info!("{ack_sequence} ACK (already seen)");
+                        self.newest_ack = Some(ack_sequence);
                     }
-                } else {
-                    // log::warn!("{ack_sequence} ACK.. but not in sent data??");
+                    // SentData stores which of their packets we acked up to in our packet,
+                    // so we can now potentially move our ack low-watermark up.
+                    // ie, they have effectively acked our acks up to this point.
+                    if let Some(lowest_ack) = self.ack_low_watermark {
+                        if SequenceBuffer::<u16>::sequence_greater_than(
+                            sent_data.acked_up_to.0,
+                            lowest_ack.0,
+                        ) {
+                            self.ack_low_watermark = Some(sent_data.acked_up_to);
+                        }
+                    } else {
+                        self.ack_low_watermark = Some(sent_data.acked_up_to);
+                    }
+                    //
+                    self.stats.packets_acked += 1;
+                    sent_data.acked = true;
+                    // this allows the dispatcher to ack the messages that were sent in this packet
+                    self.dispatcher
+                        .acked_packet(PacketId(ack_sequence), &mut self.channels);
+                    // update rtt calculations
+                    let rtt: f32 = (self.time - sent_data.time) as f32 * 1000.0;
+                    if (self.rtt == 0.0 && rtt > 0.0) || (self.rtt - rtt).abs() < 0.00001 {
+                        self.rtt = rtt;
+                    } else {
+                        self.rtt = self.rtt + ((rtt - self.rtt) * self.config.rtt_smoothing_factor);
+                    }
                 }
             }
-            ack_bits >>= 1;
         }
     }
 
@@ -635,10 +633,12 @@ mod tests {
         // this will make server realise it has MAX_UNACKED_PACKETS in flight, and shouldn't be able
         // to send anything else until it sees some acks.
         server.update(1.0);
+        info!("Server sending to client..");
         server.drain_packets_to_send().for_each(|packet| {
             client.process_incoming_packet(packet.as_ref()).unwrap();
         });
         info!("sent_unacked is now: {}", server.sent_unacked_packets());
+        info!("Send attempt for the 33rd");
         match server.send_message(0, msg) {
             Err(PacketeerError::Backpressure(Backpressure::TooManyPending)) => {}
             other => panic!("Expecting backpressure, got {other:?}"),
@@ -646,7 +646,10 @@ mod tests {
 
         client.update(1.0);
         // exchange packets
-
+        info!(
+            "Client sending to server.. sent_unacked is {}",
+            client.sent_unacked_packets()
+        );
         client.drain_packets_to_send().for_each(|packet| {
             server.process_incoming_packet(packet.as_ref()).unwrap();
         });
@@ -810,12 +813,10 @@ mod tests {
 
         let write_id = PacketId(10000);
         let ack_iter = [(100, true)].into_iter();
-        let write_ack_id = PacketId(100);
-        let write_ack_bits = 123;
 
         let mut buffer = Vec::new();
         let mut cur = Cursor::new(&mut buffer);
-        let write_packet = PacketHeader::new(write_id, ack_iter); //write_ack_id, write_ack_bits);
+        let write_packet = PacketHeader::new(write_id, ack_iter, 1).unwrap();
         write_packet.write(&mut cur).unwrap();
 
         let mut reader = Cursor::new(buffer.as_ref());
@@ -823,7 +824,10 @@ mod tests {
 
         assert_eq!(write_packet.id(), read_packet.id());
         assert_eq!(write_packet.ack_id(), read_packet.ack_id());
-        assert_eq!(write_packet.ack_bits(), read_packet.ack_bits());
+        assert_eq!(
+            write_packet.acks().unwrap().collect::<Vec<_>>(),
+            read_packet.acks().unwrap().collect::<Vec<_>>()
+        );
     }
 
     #[test]
