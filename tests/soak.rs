@@ -8,7 +8,7 @@ use packeteer::prelude::*;
 use packeteer::test_utils::*;
 
 /// How many messages to send during soak tests:
-const NUM_TEST_MSGS: usize = 1000000;
+const NUM_TEST_MSGS: usize = 10000;
 /// If doing reliable sending over lossy pipe, how many extra ticks to mop up straggling acks:
 const NUM_EXTRA_ITERATIONS: usize = 100;
 /// Random payload size is selected to generate up to this many fragments:

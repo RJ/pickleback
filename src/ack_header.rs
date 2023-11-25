@@ -6,15 +6,14 @@ use byteorder::{NetworkEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{Cursor, Write};
 use std::num::Wrapping;
 
-pub(crate) const MAX_ACK_BYTES: u8 = 5; // 5*7 = 35 bits
-pub(crate) const MAX_ACKS: usize = 7 * MAX_ACK_BYTES as usize;
+pub(crate) const MAX_ACK_BYTES: u8 = 5; // MAX_ACK_BYTES*7 = num acks.
+pub(crate) const MAX_UNACKED_PACKETS: u16 = 7 * MAX_ACK_BYTES as u16;
 
 /// ack bitfield written like so:
 /// the ack_id is sent as a normal u16, and then each bit is 1 if (ack_id - index) is acked.
 /// index increases by one each bit we read
 /// 7 bits are read per-byte, starting at least significant bit.
 /// most significant bit is continuation bit. if 1, read another byte of acks.
-
 #[derive(Copy, Clone)]
 pub(crate) struct AckHeader {
     /// the most recent sequence id to ack
@@ -38,10 +37,10 @@ impl std::fmt::Debug for AckHeader {
             f,
             "AckHeader{{ ack_id:{:?}, num_acks:{}, ack_bits:",
             self.ack_id, self.num_acks
-        );
+        )?;
         for i in 0..self.num_bytes_needed {
             let b = self.bit_buffer[i as usize];
-            write!(f, " {b:#0b}");
+            write!(f, " {b:#08b}")?;
         }
         write!(f, "}}")
     }
@@ -52,24 +51,18 @@ impl Iterator for AckHeader {
     type Item = (u16, bool);
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.byte_offset == MAX_ACK_BYTES && self.bit_offset == 7 {
+        if self.byte_offset == self.num_bytes_needed || self.byte_offset == MAX_ACK_BYTES {
             return None;
         }
         let b = self.bit_buffer[self.byte_offset as usize];
-
         let mask = 1_u8 << self.bit_offset;
         let is_acked = b & mask == mask;
         let seq_offset = 7 * self.byte_offset + self.bit_offset;
         let sequence = (Wrapping(self.ack_id.0) - Wrapping(seq_offset as u16)).0;
-        println!(
-            "ITER b: {b:#b} byte_off:{} bit_off:{} seq: {sequence} is_acked: {is_acked}",
-            self.byte_offset, self.bit_offset
-        );
         if self.bit_offset == 6 {
             if (b & 0b10000000) != 0b10000000 {
                 // no continuation bit, ensure we terminate next time
                 self.byte_offset = MAX_ACK_BYTES;
-                self.bit_offset = 7;
             } else {
                 self.byte_offset += 1;
                 self.bit_offset = 0;
@@ -100,41 +93,29 @@ impl AckHeader {
         num_acks: u16,
         ack_iter: impl Iterator<Item = (u16, bool)>,
     ) -> Result<Self, PacketeerError> {
-        // if num_acks == 0 {
-        //     return Ok(Self {
-        //         ack_id: PacketId(0),
-        //         num_acks: 0,
-        //         num_bytes_needed: 1,
-        //         bit_buffer: [0_u8; MAX_ACK_BYTES as usize],
-        //         byte_offset: 0,
-        //         bit_offset: 0,
-        //     });
-        // }
         let mut peekable_iter = ack_iter.peekable();
-        // peek the first id, which is always the most recent ack. unless a fresh boot with no acks.
+        // peek the first id, which is always the most recent ack, and gets written as a u16
+        // all prior acks get 1 bit, the offset of which is relative to the first ack id.
         let (ack_id, _) = peekable_iter.peek().expect("ack iter must be non-empty");
         let ack_id = PacketId(*ack_id);
-        // in the following bitfield, each bit is relative to the ack_id, per it's offset in the bitfield.
-        // bitfield is always at least 1 byte long.
         let num_bytes_needed = ((num_acks as f32 / 7_f32).ceil() as u8).max(1_u8);
         let mut bit_buffer = [0_u8; MAX_ACK_BYTES as usize];
         let mut writer = &mut bit_buffer[..];
         for _ in 0..num_bytes_needed {
             let mut mask: u8 = 1;
-            let mut ack_bits: u8 = 0;
+            let mut current_byte: u8 = 0;
             for _ in 0..7 {
-                if let Some((_ack_id, is_acked)) = peekable_iter.next() {
-                    if is_acked {
-                        ack_bits |= mask;
-                    }
+                match peekable_iter.next() {
+                    Some((_id, is_acked)) if is_acked => current_byte |= mask,
+                    _ => {}
                 }
                 mask <<= 1;
             }
             // the 8th and most sig bit is the continuation marker. are there more to come?
             if peekable_iter.peek().is_some() {
-                ack_bits |= mask;
+                current_byte |= mask;
             }
-            writer.write_u8(ack_bits)?;
+            writer.write_u8(current_byte)?;
         }
 
         Ok(Self {
@@ -152,8 +133,8 @@ impl AckHeader {
         let mut bit_buffer = [0_u8; MAX_ACK_BYTES as usize];
         let mut writer = &mut bit_buffer[..];
         let mut num_bytes_needed = 0_u8;
-        // just reading the correct number of bytes and storing in buffer here.
-        // use as iterator to read values
+        // just reading the correct number of bytes and storing in buffer;
+        // don't care about decoding them here – the iter does that.
         for _ in 0..MAX_ACK_BYTES {
             let b = reader.read_u8()?;
             writer.write_u8(b)?;
@@ -200,10 +181,11 @@ impl<'a> AckIter<'a> {
         seq_buffer: &'a SequenceBuffer<RecvData>,
         length: u16,
     ) -> AckIter<'a> {
+        let max = (length as f32 / 7.).ceil() as u16 * 7;
         AckIter {
             seq_buffer,
             i: 0,
-            max: (length as f32 / 7.).ceil() as u16,
+            max,
         }
     }
 }
@@ -215,24 +197,27 @@ mod tests {
     #[test]
     fn ack_header() {
         init_logger();
-        let acks = [
-            (100, true),
-            (99, true),
-            (98, true),
-            (97, true),
-            (96, false),
-            (95, false),
-            (94, true),
-            (93, true),
-        ];
-        let header = AckHeader::from_ack_iter(acks.len() as u16, acks.iter().cloned()).unwrap();
-        println!("header: {header:?}");
-        header.bit_buffer[..]
-            .iter()
-            .for_each(|b| println!("{:#b}", b));
 
-        for el in header.into_iter() {
-            println!("{el:?}");
+        fn mk_acks(len: u16) -> Vec<(u16, bool)> {
+            let start = rand::random::<u16>();
+            let mut v = vec![(start, true)];
+            for i in 1..len {
+                let id = (Wrapping(start) - Wrapping(i)).0;
+                let is_acked = rand::random::<bool>();
+                v.push((id, is_acked));
+            }
+            v
+        }
+
+        for i in 0..1000 {
+            let len = i % MAX_UNACKED_PACKETS;
+            // always send multiple of 7 acks, due to encoding format
+            let len = ((len as f32 / 7.0).ceil() * 7.) as u16;
+            let len = len.max(7);
+            let acks = mk_acks(len);
+            let header = AckHeader::from_ack_iter(acks.len() as u16, acks.iter().cloned()).unwrap();
+            let decoded = header.into_iter().collect::<Vec<_>>();
+            assert_eq!(decoded, acks, "ack mismatch, len was {len}");
         }
     }
 }

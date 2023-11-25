@@ -81,7 +81,7 @@ pub mod prelude {
 }
 
 /// Don't send more than this many unacked packets, or acks break.
-pub(crate) const MAX_UNACKED_PACKETS: u16 = 32;
+// pub(crate) const MAX_UNACKED_PACKETS: u16 = 32;
 
 /// returned from send - contains packet seqno
 #[derive(Debug, Eq, PartialEq, Hash, Clone, Copy, PartialOrd, Ord, Default)]
@@ -490,7 +490,7 @@ impl Packeteer {
     /// ack the message ids associated with the packet sequence nunmber.
     /// Updates rtt calculations.
     fn process_packet_acks_and_rtt(&mut self, header: &PacketHeader) {
-        let Some(ack_iter) = header.ack_header().map(|header| header.into_iter()) else {
+        let Some(ack_iter) = header.acks() else {
             return;
         };
         for (ack_sequence, is_acked) in ack_iter {
@@ -626,7 +626,8 @@ mod tests {
         let msg = &[0x42_u8; 1024];
         let mut sent_ids = Vec::new();
         // Fails when sending more than 32 in flight due to ack field size?
-        for _ in 0..MAX_UNACKED_PACKETS {
+        for _ in 0..35 {
+            // MAX_UNACKED_PACKETS {
             sent_ids.push(server.send_message(0, msg).unwrap());
         }
         // update server so it sends packets.
@@ -713,55 +714,6 @@ mod tests {
     }
 
     const TEST_BUFFER_SIZE: usize = 256;
-
-    #[test]
-    fn ack_bits() {
-        crate::test_utils::init_logger();
-
-        #[allow(unused)]
-        #[derive(Debug, Clone, Default)]
-        struct TestData {
-            sequence: u16,
-        }
-
-        let mut buffer = SequenceBuffer::<TestData>::with_capacity(TEST_BUFFER_SIZE);
-
-        for i in 0..TEST_BUFFER_SIZE + 1 {
-            buffer
-                .insert(TestData { sequence: i as u16 }, i as u16)
-                .unwrap();
-        }
-
-        let (ack, ack_bits) = buffer.ack_bits();
-        println!("ack_bits = {ack_bits:#032b}");
-        assert_eq!(ack, TEST_BUFFER_SIZE as u16);
-        assert_eq!(ack_bits, 0xFFFFFFFF);
-
-        ////
-
-        buffer = SequenceBuffer::<TestData>::with_capacity(TEST_BUFFER_SIZE);
-
-        for ack in [1, 5, 9, 11].iter() {
-            buffer
-                .insert(
-                    TestData {
-                        sequence: *ack as u16,
-                    },
-                    *ack as u16,
-                )
-                .unwrap();
-        }
-
-        let (ack, ack_bits) = buffer.ack_bits();
-        let expected_ack_bits = 1 | (1 << (11 - 9)) | (1 << (11 - 5)) | (1 << (11 - 1));
-
-        assert_eq!(ack, 11);
-
-        println!("ack_bits = {ack_bits:#032b}");
-        println!("expected = {expected_ack_bits:#032b}");
-        // bits that should be set:
-        assert_eq!(ack_bits, expected_ack_bits);
-    }
 
     #[test]
     fn sequence_test() {
