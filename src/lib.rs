@@ -574,8 +574,6 @@ mod tests {
 
     use super::*;
     use test_utils::*;
-    // explicit import to override bevy
-    // use log::{debug, error, info, trace, warn};
 
     #[test]
     fn drop_duplicate_packets() {
@@ -625,9 +623,8 @@ mod tests {
         let mut client = Packeteer::default();
         let msg = &[0x42_u8; 1024];
         let mut sent_ids = Vec::new();
-        // Fails when sending more than 32 in flight due to ack field size?
-        for _ in 0..35 {
-            // MAX_UNACKED_PACKETS {
+        // sending this many full-packet-sized messages is the max we can send before acks arrive
+        for _ in 0..MAX_UNACKED_PACKETS {
             sent_ids.push(server.send_message(0, msg).unwrap());
         }
         // update server so it sends packets.
@@ -639,7 +636,7 @@ mod tests {
             client.process_incoming_packet(packet.as_ref()).unwrap();
         });
         info!("sent_unacked is now: {}", server.sent_unacked_packets());
-        info!("Send attempt for the 33rd");
+        info!("Send attempt for MAX_UNACKED_PACKETS+1");
         match server.send_message(0, msg) {
             Err(PacketeerError::Backpressure(Backpressure::TooManyPending)) => {}
             other => panic!("Expecting backpressure, got {other:?}"),
