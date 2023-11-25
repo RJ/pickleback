@@ -1,39 +1,22 @@
 ///
 /// ## Packet Anatomy
 ///
-/// ### PrefixByte
-///
-/// Is a `u8` at the start of each packet.
-///
-/// | bits       |              | description                                                                            |
-/// | ---------- | ------------ | -------------------------------------------------------------------------------------- |
-/// | `-------X` | `=  0`       | X = 0  = regular packet containing messages                                            |
-/// | `---XXXX-` | `<< 1,2,3,4` | denotes size of ack mask. each of 4 bits meaning another byte of ack mask data follows |
-/// | `--X-----` | `<<5`        | sequence difference bit                                                                |
-/// | `XX------` | `<<6,7`      | currently unused                                                                       |
-///
-/// ### PacketHeader
-///
-/// | bytes              | type             | description                                                                                                     |
-/// | ------------------ | ---------------- | --------------------------------------------------------------------------------------------------------------- |
-/// | 1                  | `u8`             | `PrefixByte`                                                                                                    |
-/// | 2,3                | `u16_le`         | sequence                                                                                                        |
-/// | 4 or 4,5           | `u8` or `u16_le` | sequence_difference, depending on sequnce difference bit in PrefixByte. <br> `sequence` - `last_acked_sequence` |
-/// | 5,6,7,8 or 6,7,8,9 | `u8` x 1-4       | ack bits mask                                                                                                   |
-///
-use crate::{sequence_buffer::AckIter, PacketId, PacketeerError};
+///  TODO maybe use bitflags or bitmask-enum crate for prefixbytes
+use crate::{ack_header::AckHeader, PacketId, PacketeerError};
 use byteorder::{NetworkEndian, ReadBytesExt, WriteBytesExt};
 use log::*;
 use std::{
     io::{Cursor, Write},
+    iter,
     num::Wrapping,
 };
 
-#[derive(Clone, PartialEq, PartialOrd, Debug, Default)]
+#[derive(Debug)]
 pub struct PacketHeader {
     id: PacketId,
-    ack_id: PacketId,
-    ack_bits: u32,
+    ack_header: Option<AckHeader>,
+    // ack_id: PacketId,
+    // ack_bits: u32,
 }
 
 // pub(crate) struct AckWindow {
@@ -42,16 +25,22 @@ pub struct PacketHeader {
 // }
 
 impl PacketHeader {
-    pub fn new(id: PacketId, ack_iter: impl Iterator<Item = (u16, bool)>) -> Self {
-        //ack_id: PacketId, ack_bits: u32) -> Self {
-        let (ack_id, ack_bits) = Self::make_ack_bits(ack_iter);
-        Self {
+    pub fn new_no_acks(id: PacketId) -> Result<Self, PacketeerError> {
+        Ok(Self {
             id,
-            ack_id,
-            ack_bits,
-        }
+            ack_header: None,
+        })
     }
-
+    pub fn new(
+        id: PacketId,
+        ack_iter: impl Iterator<Item = (u16, bool)>,
+        num_acks_required: u16,
+    ) -> Result<Self, PacketeerError> {
+        assert!(num_acks_required > 0, "num acks required must be > 0");
+        let ack_header = Some(AckHeader::from_ack_iter(num_acks_required, ack_iter)?);
+        Ok(Self { id, ack_header })
+    }
+    /*
     fn make_ack_bits(ack_iter: impl Iterator<Item = (u16, bool)>) -> (PacketId, u32) {
         let mut peekable_iter = ack_iter.peekable();
         // peek the first id, which is always the most recent ack.
@@ -72,167 +61,66 @@ impl PacketHeader {
         info!("ACK_ID = {ack_id} ACK_BITS -> {ack_bits:#032b}");
         (PacketId(ack_id), ack_bits)
     }
+    */
 
     pub fn id(&self) -> PacketId {
         self.id
     }
-    pub fn ack_id(&self) -> PacketId {
-        self.ack_id
+    pub fn ack_id(&self) -> Option<PacketId> {
+        self.ack_header.map(|header| header.ack_id())
     }
-    pub fn ack_bits(&self) -> u32 {
-        self.ack_bits
+    pub fn acks(&self) -> Option<impl Iterator<Item = (u16, bool)>> {
+        self.ack_header.map(|header| header.into_iter())
     }
+
+    pub fn ack_header(&self) -> Option<&AckHeader> {
+        self.ack_header.as_ref()
+    }
+    // pub fn ack_bits(&self) -> u32 {
+    //     self.ack_bits
+    // }
 
     // pub fn max_possible_size() -> usize {
     //     9
     // }
 
     pub fn size(&self) -> usize {
-        let mut size: usize = 3;
-
-        let mut sequence_difference = i32::from((Wrapping(self.id.0) - Wrapping(self.ack_id.0)).0);
-        if sequence_difference < 0 {
-            sequence_difference = (Wrapping(sequence_difference) + Wrapping(65536)).0;
-        }
-
-        if sequence_difference <= 255 {
-            size += 1;
-        } else {
-            size += 2;
-        }
-
-        if (self.ack_bits & 0x0000_00FF) != 0x0000_00FF {
-            size += 1;
-        }
-        if (self.ack_bits & 0x0000_FF00) != 0x0000_FF00 {
-            size += 1;
-        }
-
-        if (self.ack_bits & 0x00FF_0000) != 0x00FF_0000 {
-            size += 1;
-        }
-        if (self.ack_bits & 0xFF00_0000) != 0xFF00_0000 {
-            size += 1;
-        }
-
-        size
+        1 + // prefix bytes
+        2 + // packet sequence id
+        self.ack_header.map_or(0, |header| header.size())
     }
 
     // max of 9 bytes?
-    pub fn write(&self, writer: &mut impl Write) -> Result<(), PacketeerError> {
-        // if writer.remaining_mut() < 9 {
-        //     panic!("::write given too-small BytesMut");
-        // }
-
+    pub fn write(&self, mut writer: &mut impl Write) -> Result<(), PacketeerError> {
         let mut prefix_byte = 0;
 
-        if (self.ack_bits & 0x0000_00FF) != 0x0000_00FF {
-            prefix_byte |= 1 << 1;
+        // second bit 1 ==> ack header present.
+        if self.ack_header.is_some() {
+            prefix_byte |= 0b0000_0010;
         }
-
-        if (self.ack_bits & 0x0000_FF00) != 0x0000_FF00 {
-            prefix_byte |= 1 << 2;
-        }
-
-        if (self.ack_bits & 0x00FF_0000) != 0x00FF_0000 {
-            prefix_byte |= 1 << 3;
-        }
-
-        if (self.ack_bits & 0xFF00_0000) != 0xFF00_0000 {
-            prefix_byte |= 1 << 4;
-        }
-
-        let mut sequence_difference = i32::from((Wrapping(self.id.0) - Wrapping(self.ack_id.0)).0);
-        if sequence_difference < 0 {
-            sequence_difference = (Wrapping(sequence_difference) + Wrapping(65536)).0;
-        }
-
-        if sequence_difference <= 255 {
-            prefix_byte |= 1 << 5;
-        }
-
+        // use a bit to say if the ack_id in the ack header is > 255 from the packet id,
+        // and write it as a u8/u16 delta to maybe save a byte?
         writer.write_u8(prefix_byte)?; // 1
         writer.write_u16::<NetworkEndian>(self.id.0)?; // +2 = 3
-
-        if sequence_difference <= 255 {
-            writer.write_u8(sequence_difference as u8)?; // +1 = 4
-        } else {
-            writer.write_u16::<NetworkEndian>(self.ack_id.0)?; // or +2 = 5
+        if let Some(ack_header) = self.ack_header {
+            ack_header.write(&mut writer)?;
         }
-        // +4:
-        if (self.ack_bits & 0x0000_00FF) != 0x0000_00FF {
-            writer.write_u8((self.ack_bits & 0x0000_00FF) as u8)?;
-        }
-
-        if (self.ack_bits & 0x0000_FF00) != 0x0000_FF00 {
-            writer.write_u8(((self.ack_bits & 0x0000_FF00) >> 8) as u8)?;
-        }
-
-        if (self.ack_bits & 0x00FF_0000) != 0x00FF_0000 {
-            writer.write_u8(((self.ack_bits & 0x00FF_0000) >> 16) as u8)?;
-        }
-
-        if (self.ack_bits & 0xFF00_0000) != 0xFF00_0000 {
-            writer.write_u8(((self.ack_bits & 0xFF00_0000) >> 24) as u8)?;
-        }
-
         Ok(())
     }
 
     pub fn parse(reader: &mut Cursor<&[u8]>) -> Result<Self, PacketeerError> {
         let prefix_byte = reader.read_u8()?;
-
         if prefix_byte & 1 != 0 {
             error!("prefix byte does not indicate regular packet");
             return Err(PacketeerError::InvalidPacket);
         }
-
-        let mut ack_bits: u32 = 0xFFFF_FFFF;
+        let ack_header_present = prefix_byte & 0b0000_0010 != 0;
         let id = PacketId(reader.read_u16::<NetworkEndian>()?);
-        // ack is greatest seqno seen, ie largest sequence being acked.
-        // it's encoded as a delta vs the packet's seq id.
-        let ack_id = if prefix_byte & (1 << 5) != 0 {
-            let sequence_difference = reader.read_u8()?;
-            PacketId((Wrapping(id.0) - Wrapping(u16::from(sequence_difference))).0)
+        let ack_header = if ack_header_present {
+            Some(AckHeader::parse(reader)?)
         } else {
-            PacketId(reader.read_u16::<NetworkEndian>()?)
+            None
         };
-
-        // let mut expected_ack_bytes: usize = 0;
-        // for i in 1..5 {
-        //     if prefix_byte & (1 << i) != 0 {
-        //         expected_ack_bytes += 1;
-        //     }
-        // }
-        // if reader.remaining() < expected_ack_bytes {
-        //     error!("Packet too small for packet header (4) expected_ack_bytes: {expected_ack_bytes} remaining: {}", reader.remaining());
-        //     return Err(PacketeerError::InvalidPacket);
-        // }
-
-        if prefix_byte & (1 << 1) != 0 {
-            ack_bits &= 0xFFFF_FF00;
-            ack_bits |= u32::from(reader.read_u8()?);
-        }
-
-        if prefix_byte & (1 << 2) != 0 {
-            ack_bits &= 0xFFFF_00FF;
-            ack_bits |= u32::from(reader.read_u8()?) << 8;
-        }
-
-        if prefix_byte & (1 << 3) != 0 {
-            ack_bits &= 0xFF00_FFFF;
-            ack_bits |= u32::from(reader.read_u8()?) << 16;
-        }
-
-        if prefix_byte & (1 << 4) != 0 {
-            ack_bits &= 0x00FF_FFFF;
-            ack_bits |= u32::from(reader.read_u8()?) << 24;
-        }
-
-        Ok(Self {
-            id,
-            ack_id,
-            ack_bits,
-        })
+        Ok(Self { id, ack_header })
     }
 }

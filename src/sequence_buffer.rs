@@ -1,38 +1,6 @@
 use crate::{tracking::RecvData, PacketeerError};
 use std::num::Wrapping;
 
-/// An iterator of received sequence ids
-pub struct AckIter<'a> {
-    seq_buffer: &'a SequenceBuffer<RecvData>,
-    i: u16,
-    max: u16,
-}
-impl<'a> Iterator for AckIter<'a> {
-    type Item = (u16, bool);
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.i >= self.max {
-            None
-        } else {
-            let sequence = (Wrapping(self.seq_buffer.sequence) - Wrapping(self.i)).0;
-            let exists = self.seq_buffer.exists(sequence);
-            self.i += 1;
-            Some((sequence, exists))
-        }
-    }
-}
-impl<'a> AckIter<'a> {
-    pub(crate) fn with_length(
-        seq_buffer: &'a SequenceBuffer<RecvData>,
-        length: u16,
-    ) -> AckIter<'a> {
-        AckIter {
-            seq_buffer,
-            i: 0,
-            max: length,
-        }
-    }
-}
-
 pub struct SequenceBuffer<T>
 where
     T: Default + std::clone::Clone + Send + Sync,
