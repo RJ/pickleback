@@ -1,161 +1,75 @@
 # Packeteer
 
- TODO:
+A way to multiplex and coalesce messages over an unreliable stream of datagrams, for game netcode.
 
-* figure out sizes of various SeuqnceBuffers and add to config.
-* review packet/message parsing code for unwraps/potential crashes.
-* improve logic in packet coalescing function
-* discuss api with discord: is send_message ok? you have to write your msg to a tmp buffer,
-  then packeteer copies it to a pooled buffer,
-* could offer an option to grab a pooled buffer and write to that, if you know the size of msg?
+Typically you hook this up to UDP sockets.
 
-## Max in-flight packets / ack limitations
+## Features
 
-Say you need to send a burst of packets for a large payload, you send 30 fragments.
-Now there are 30 unacked packets in flight. If you send 
+* Coalesces multiple small messages into packets
+* Transparently fragments & reassembles messages too large for one packet
+* Multiple virtual channels for sending/receiving messages
+* Optionally reliable channels, with configurable resending behaviour
+* Sending a messages gives you a handle, to use for checking packet acks
+* Internal pool of buffers for messages and packets, to minimise allocations
+* No async: designed to integrate into your existing game loop. Call it each tick.
+* Unit tests and integration / soak tests with bad-link simulator that drops, dupes, & reorders packets.
+* Calculates rtt
 
-**A protocol layer for unreliable datagram exchange**
+## TODO
+* Calculate packet loss estimate
+* Bandwidth tracking and budgeting
+* Allow configuration of channels and channel settings (1 reliable, 1 unreliable only atm)
+* Ordering of channels for selecting messages to send
+* Example using bevy and an unreliable transport mechanism.
+* Perhaps offer a bincoded channel of things that `impl Serialize`?
+* Seek feedback on design and public API.
+* Benchmark with and without pooled buffers.
 
-* One instance of `Packeteer` sits at each end of an unreliable datagram channel between two peers.
-* `Packeteer` doesn't handle networking, has no concept of sockets or network addresses or client ids.
-* A gameserver might have a `HashMap<ClientId, Packeteer>`, and a client would have a single `Packeteer` instance.
-* You need to manage sockets/transports/`SocketAddr` yourself and marshal packets with the correct `Packeteer` instance.
-
-### Deets
-
-* The unit of transmission in Packeteer is the `Message` - it can be between 1 byte and 1 MB.
-* Multiple messages are coalesced into packets for transmission.
-* Messages will be automatically fragmented over multiple packets if they exceed 1024 bytes.
-* Sending large messages over an unreliable channel means if any single fragment is lost,
-  the entire message is lost.
-* When you send a message (ie, provide the `&[u8]` payload) you get a `MessageId` – you can check if the
-  `MessageId` has been acked later.
-
-### Allocations and Memory Management
-
-Currently Packeteer has a pool of reusable `Vec<u8>` with varying capacities.
-When you send a message, 
-
-
-
-
-#### Example game loop
+## Example
 
 ```rust
-fn read_packet_from_network() -> Bytes {
-    // however you like
-}
-fn send_packet_to_network(packet: Bytes) {
-    // however you like
-}
+use packeteer::prelude::*;
 
-loop {
-    packeteer.update(delta_time)
-    // pass received packets to packeteer:
-    while let Some(packet) = read_packets_from_network() {
-        packeteer.receive_packet(packet);
-    }
+// Packeteer is just an endpoint, and server and client are simply names here.
+// both ends of the connection behave identically.
+let mut server = Packeteer::default();
+let mut client = Packeteer::default();
 
-    simulate_your_game();
+let channel: u8 = 0;
 
-    // simulating your game will have enqueued messages to send:
-    for packet in packeteer.packets_to_send() {
-        send_packet_to_network(packet, ...);
-    }
-}
-```
+// this can return an error if throttled due to backpressure and unable to send.
+// we unwrap here, since it will not fail at this point.
+let msg_id: MessageId = server.send_message(channel, b"hello").unwrap();
 
-This library does not do any networking. It is designed to run as part of the game loop – you
-call `packeteer.update(delta_time)` at the start of each game tick, along with passing in received
-datagrams via `packeteer.receive_packets(...)`. Towards the end of each tick, you must send packets provided by `packeteer.packets_to_send()`.
+// update server clock, and transmit server packets to the client
+server.update(1.0);
+server.drain_packets_to_send().for_each(|packet| {
+    // this is where you send the packet over UDP or something
+    client.process_incoming_packet(packet.as_ref()).unwrap();
+});
 
-#### API Overview
+// client will have received a message:
+let received = client.drain_received_messages(0).collect::<Vec<_>>();
+assert_eq!(received.len(), 1);
+// normally you'd use the .payload() to get a Reader, rather than payload_to_owned()
+// which reads it into a Vec. But a vec here makes it easier to test.
+let recv_payload = received[0].payload_to_owned();
+assert_eq!(b"hello".to_vec(), recv_payload);
 
-You send "messages", which are just `Bytes`. When you call send, packeteer
-gives you a message id. Later, you get the ACKs to see if that message was delivered.
+// even thought the client doesn't have a message payload to send, it will send
+// an empty packet here just to transmit acks
+client.update(1.0);
+client.drain_packets_to_send().for_each(|packet| {
+    // this is where you send the packet over UDP or something
+    server.process_incoming_packet(packet.as_ref()).unwrap();
+});
 
-```rust
-// channels are optionally reliable, optionally ordered.
-let channel = MyChannels::Something;
-
-let msg = Bytes::new(...);
-let msg_id = packeteer.send_message(channel, msg);
-
-// other end of connection:
-
-for msg in packeteer.drain_received_messages(channel)  {
-    // ...
-}
-
-// later / next tick
-
-let new_message_id_acks = packeteer.drain_message_acks();
-if new_message_id_acks.contains(msg_id) {
-    println!("{msg_id} was acked");
-}
-
-```
-
-Under the hood, small messages are coalesced into packets to be sent. Larger messages are fragmented
-and send using multiple packets for you.
-
-
-
-### Channel Types
-
-Messages are sent on channels, which are configured to optionally reliable and or ordered.
-
-
-
-
-
-### Packet Layer
-
-fork of reliable, can only send packets under the mtu (no fragmenting).
-handles packet level acks.
-
-### Message Layer
-
-small messages are coalesced into packets, and acked per message to consumer.
-large messages are fragmented into multiple smaller messages and reassembled.
-
-
-
-
-## reliable messages
-
-send/receive channel. like the inbox/outbox, but hides the reliablility or ordering bits?
-inbox: packets go in, messages go to outbbox
-outbox: during update() can write resends to outbox too
-
-
-# What happens per layers
-
-## Base Packet Layer
-
-base layer is the sending of unreliable, unordered, unfragmented, less-than-mtu size datagrams, with acks.
-the packet header ackfield handles acking of packets.
-all this layer does is add a thin header to packets to transmit acks and packet seqnos.
-
-## ??
-```rust
-api.send_message(channel, payload)
-
-let channel = api.get_channel(channel);
-// this will either add a single msg, or lots of fragments, to the channel:
-let msg_id = dispatcher.add_message_to_channel(&mut channel, payload);
-// and later.
-let messages_received: Vec<Message> = dispatcher.process_message(&mut channel, message);
-// (empty if a fragment of incomplete msg)
-
+// now the client has sent packets, the server will have received an ack
+assert_eq!(vec![msg_id], server.drain_message_acks(channel).collect::<Vec<_>>());
 ```
 
 
-# Notes
-
-each message needs an id on the wire, since that's the only way we can dedupe on receiving end?
-then we prevent duplicated  msgs being received in any channel (and can reorder, drop stale.)
-
-it's a problem when we resend a msg because ack is late arriving - it arrives twice.
-
-
+### Provenance
+* [Gaffer articles](https://gafferongames.com/post/reliable_ordered_messages/) (building network protocol, packet acking, sequence buffer, etc)
+* [netcode.io rust code](https://github.com/jaynus/netcode.io/tree/master) (implementation of gaffer concepts)

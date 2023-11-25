@@ -1,36 +1,6 @@
 #![warn(missing_docs, clippy::missing_errors_doc, clippy::missing_panics_doc)]
-//! # Packeteer
-//!
-//! A way to multiplex and coalesce messages over an unreliable stream of datagrams, for game netcode.
-//!
-//! Typically you hook this up to UDP sockets.
-//!
-//! ## Features
-//!
-//! * Coalesces multiple small messages into packets
-//! * Transparently fragments & reassembles messages too large for one packet
-//! * Multiple virtual channels for sending/receiving messages
-//! * Optionally reliable channels, with configurable resending behaviour
-//! * Sending a messages gives you a handle, to use for checking packet acks
-//! * Internal pool of buffers for messages and packets, to minimise allocations
-//! * No async: designed to integrate into your existing game loop. Call it each tick.
-//! * Unit tests and integration / soak tests with bad-link simulator that drops, dupes, & reorders packets.
-//! * Calculates rtt
-//!
-//! ## TODO
-//! * Calculate packet loss estimate
-//! * Bandwidth tracking and budgeting
-//! * Allow configuration of channels and channel settings (1 reliable, 1 unreliable only atm)
-//! * Ordering of channels for selecting messages to send
-//! * Example using bevy and an unreliable transport mechanism.
-//! * Perhaps offer a bincoded channel of things that `impl Serialize`.
-//! * Seek feedback on design and public API.
-//! * Benchmark with and without pooled buffers.
-//!
-//!
-//! ### Provenance
-//! * [Gaffer articles](https://gafferongames.com/post/reliable_ordered_messages/) (building network protocol, packet acking, seq bufferer, messages, etc)
-//! * [netcode.io rust code](https://github.com/jaynus/netcode.io/tree/master) (sequence buffer, packet header and acking code)
+#![doc = include_str!("../README.md")]
+
 use cursor::{BufferLimitedWriter, CursorExtras};
 ///
 use log::*;
@@ -605,20 +575,9 @@ mod tests {
         }
     }
 
-    // if you send a 33kB message, it will be fragmented over 33 packets and all sent
-    // at once. This is a problem, since the ackfield is only 32 bits - so can only ack up to
-    // 32 previous messages.
-    //
-    // Perhaps i want an arbitrary length bitmask varint style with a continuation bit?
-    // we kinda want to optimise for fewer acks in flight anyway.
-    //
-    // maybe if the 4th octet of acks is used, it uses 1 bit for continuation like varint?
-    // so the bitfield can extend indefinitely.
-    //
     #[test]
     fn many_packets_in_flight() {
         crate::test_utils::init_logger();
-        // what happens if we have > 32 packets in-flight, do acks still work?
         let mut server = Packeteer::default();
         let mut client = Packeteer::default();
         let msg = &[0x42_u8; 1024];
