@@ -120,7 +120,7 @@ impl MessageDispatcher {
     pub(crate) fn add_message_to_channel(
         &mut self,
         pool: &BufPool,
-        channel: &mut Box<dyn Channel>,
+        channel: &mut Channel,
         payload: &[u8],
     ) -> Result<MessageId, PacketeerError> {
         if payload.len() <= 1024 {
@@ -135,7 +135,7 @@ impl MessageDispatcher {
     fn add_large_message_to_channel(
         &mut self,
         pool: &BufPool,
-        channel: &mut Box<dyn Channel>,
+        channel: &mut Channel,
         payload: &[u8],
     ) -> Result<MessageId, PacketeerError> {
         assert!(payload.len() > 1024);

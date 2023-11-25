@@ -1,11 +1,10 @@
 use crate::*;
+use enum_dispatch::*;
+
 pub const MAX_CHANNELS: usize = 32;
 
-type BoxedChannel = Box<dyn Channel>;
-
-// TODO use enum_dispatch? https://docs.rs/enum_dispatch/latest/enum_dispatch
-
-pub(crate) trait Channel {
+#[enum_dispatch]
+pub(crate) trait ChannelT {
     fn id(&self) -> u8;
     fn update(&mut self, time: f64);
     fn any_ready_to_send(&self) -> bool;
@@ -23,6 +22,12 @@ pub(crate) trait Channel {
     fn get_message_to_write_to_a_packet(&mut self, max_size: usize) -> Option<Message>;
     // false if we've already fully received this message id, or it's known to be stale/useless
     fn accepts_message(&mut self, msg: &Message) -> bool;
+}
+
+#[enum_dispatch(ChannelT)]
+pub(crate) enum Channel {
+    UnreliableChannel,
+    ReliableChannel,
 }
 
 pub(crate) struct UnreliableChannel {
@@ -43,7 +48,7 @@ impl UnreliableChannel {
     }
 }
 
-impl Channel for UnreliableChannel {
+impl ChannelT for UnreliableChannel {
     fn update(&mut self, dt: f64) {
         self.time += dt;
     }
@@ -147,7 +152,7 @@ impl ReliableChannel {
     }
 }
 
-impl Channel for ReliableChannel {
+impl ChannelT for ReliableChannel {
     fn update(&mut self, dt: f64) {
         self.time += dt;
     }
@@ -261,23 +266,23 @@ mod tests {
 
 #[derive(Default)]
 pub(crate) struct ChannelList {
-    channels: smallmap::Map<u8, BoxedChannel>,
+    channels: smallmap::Map<u8, Channel>,
 }
 impl ChannelList {
-    pub(crate) fn get_mut(&mut self, id: u8) -> Option<&mut Box<dyn Channel>> {
+    pub(crate) fn get_mut(&mut self, id: u8) -> Option<&mut Channel> {
         self.channels.get_mut(&id)
     }
-    pub(crate) fn insert(&mut self, channel: Box<dyn Channel>) {
+    pub(crate) fn insert(&mut self, channel: Channel) {
         assert!(
             (channel.id() as usize) < MAX_CHANNELS,
             "channel.id exceeds max"
         );
         self.channels.insert(channel.id(), channel);
     }
-    pub(crate) fn all_mut(&mut self) -> impl Iterator<Item = &mut BoxedChannel> {
+    pub(crate) fn all_mut(&mut self) -> impl Iterator<Item = &mut Channel> {
         self.channels.values_mut()
     }
-    pub(crate) fn all_non_empty_mut(&mut self) -> impl Iterator<Item = &mut BoxedChannel> {
+    pub(crate) fn all_non_empty_mut(&mut self) -> impl Iterator<Item = &mut Channel> {
         self.channels.values_mut().filter(|c| c.any_ready_to_send())
     }
     pub(crate) fn any_with_messages_to_send(&self) -> bool {
