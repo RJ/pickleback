@@ -8,16 +8,12 @@ use packeteer::prelude::*;
 use packeteer::test_utils::*;
 
 /// How many messages to send during soak tests:
-const NUM_TEST_MSGS: usize = 10000;
+const NUM_TEST_MSGS: usize = 100000;
 /// If doing reliable sending over lossy pipe, how many extra ticks to mop up straggling acks:
 const NUM_EXTRA_ITERATIONS: usize = 100;
 /// Random payload size is selected to generate up to this many fragments:
 const MAX_FRAGMENTS: u32 = 10;
 
-/*
-    NB: if limited to 32 bit ack field, ensure we don't have more messages in flight than 32 or acks break.
-        so MAX_FRAGMENTS * num_to_send must be < 32
-*/
 #[test]
 fn soak_message_transmission() {
     init_logger();
@@ -35,7 +31,7 @@ fn soak_message_transmission() {
 
     'sending: while !test_msgs.is_empty() {
         // Send up to num_to-  NB: check MAX_FRAGMENTS * this is under ack limit.
-        let num_to_send = rand::random::<usize>() % 3;
+        let num_to_send = rand::random::<usize>() % 7;
         let mut num_sent = 0;
 
         for _ in 0..num_to_send {
@@ -71,8 +67,6 @@ fn soak_message_transmission() {
             num_sent,
             "didn't receive all the messages sent this tick"
         );
-
-        log::info!("XXX acks: {acks:?} send_ids: {sent_ids:?}");
 
         for recv_msg in client_received_messages.iter() {
             let rec = recv_msg.payload_to_owned();
