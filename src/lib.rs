@@ -7,7 +7,6 @@ use log::*;
 use std::{
     collections::{HashMap, VecDeque},
     io::{Cursor, Write},
-    num::Wrapping,
 };
 mod ack_header;
 mod buffer_pool;
@@ -50,10 +49,7 @@ pub mod prelude {
     pub use super::Packeteer;
 }
 
-/// Don't send more than this many unacked packets, or acks break.
-// pub(crate) const MAX_UNACKED_PACKETS: u16 = 32;
-
-/// returned from send - contains packet seqno
+/// Identifies a packet - contains sequence number
 #[derive(Debug, Eq, PartialEq, Hash, Clone, Copy, PartialOrd, Ord, Default)]
 pub(crate) struct PacketId(pub(crate) u16);
 
@@ -69,8 +65,8 @@ pub struct Packeteer {
     ack_low_watermark: Option<PacketId>,
     dispatcher: MessageDispatcher,
     channels: ChannelList,
-    sent_buffer: SequenceBuffer<SentData>,
-    recv_buffer: SequenceBuffer<RecvData>,
+    sent_buffer: SequenceBuffer<SentMeta>,
+    received_buffer: SequenceBuffer<ReceivedMeta>,
     stats: PacketeerStats,
     outbox: VecDeque<BufHandle>,
     pool: BufPool,
@@ -101,7 +97,7 @@ impl Packeteer {
             newest_ack: None,
             ack_low_watermark: None,
             sent_buffer: SequenceBuffer::with_capacity(config.sent_packets_buffer_size),
-            recv_buffer: SequenceBuffer::with_capacity(config.received_packets_buffer_size),
+            received_buffer: SequenceBuffer::with_capacity(config.received_packets_buffer_size),
             dispatcher: MessageDispatcher::new(&config),
             stats: PacketeerStats::default(),
             outbox: VecDeque::new(),
@@ -194,23 +190,18 @@ impl Packeteer {
     /// ie, used to decide what range of acks to send with every outbound packet.
     fn received_unacked_packets(&self) -> u16 {
         if let Some(lowest_ack) = self.ack_low_watermark {
-            (Wrapping(self.recv_buffer.sequence()) - Wrapping(lowest_ack.0)).0
+            self.received_buffer.sequence().wrapping_sub(lowest_ack.0)
         } else {
             // nothing has been acked yet, so everything?
-            self.recv_buffer.sequence()
+            self.received_buffer.sequence()
         }
-        // // calculate required ack window. inclusive range.
-        // let lowest_ack = self
-        //     .ack_low_watermark
-        //     .map(|alw| alw.0) //(Wrapping(alw.0) + Wrapping(1)).0)
-        //     .unwrap_or_default();
-        // let highest_ack = self.recv_buffer.sequence();
-        // (Wrapping(highest_ack) - Wrapping(lowest_ack) + Wrapping(1)).0
     }
 
     /// How many packets have we sent that we haven't received acks for yet?
     pub fn sent_unacked_packets(&self) -> u16 {
-        (Wrapping(self.sent_buffer.sequence()) - Wrapping(self.newest_ack.unwrap_or_default())).0
+        self.sent_buffer
+            .sequence()
+            .wrapping_sub(self.newest_ack.unwrap_or_default())
     }
 
     /// Creates a PacketHeader using the next packet sequence number, and an ack-field of recent acks.
@@ -227,10 +218,8 @@ impl Packeteer {
         if num_acks_required == 0 {
             Ok(PacketHeader::new_no_acks(id)?)
         } else {
-            let ack_iter = AckIter::with_minimum_length(&self.recv_buffer, num_acks_required);
+            let ack_iter = AckIter::with_minimum_length(&self.received_buffer, num_acks_required);
             let ret = PacketHeader::new(id, ack_iter, num_acks_required)?;
-            // let (ack_id, ack_bits) = self.recv_buffer.ack_bits();
-            // info!("Original ack_id: {ack_id}, ack_bits = {ack_bits:#032b}");
             info!("Packetheader: {ret:?}");
             Ok(ret)
         }
@@ -360,13 +349,13 @@ impl Packeteer {
     /// The consumer code should fetch and dispatch it via whatever means they like.
     fn send_packet(&mut self, packet: BufHandle) -> Result<(), PacketeerError> {
         let send_size = packet.len() + self.config.packet_header_size;
-        // recv_buffer.sequence() is the most recent packet ack we're acknowledging reciept of in the
+        // received_buffer.sequence() is the most recent packet ack we're acknowledging reciept of in the
         // header of this packet we're about to send.
         // We include it in the SentData so, once OUR packet gets acked, we have a low-watermark
         // telling us we don't need to bother acking anything prior to this id in future packets.
-        let acking_up_to = self.recv_buffer.sequence();
+        let acking_up_to = self.received_buffer.sequence();
         self.sent_buffer.insert(
-            SentData::new(self.time, send_size, PacketId(acking_up_to)),
+            SentMeta::new(self.time, send_size, PacketId(acking_up_to)),
             self.sequence_id,
         )?;
         self.outbox.push_back(packet);
@@ -414,19 +403,19 @@ impl Packeteer {
             header.ack_id(),
         );
         // if this packet sequence is out of range, reject as stale
-        if !self.recv_buffer.check_sequence(header.id().0) {
+        if !self.received_buffer.check_sequence(header.id().0) {
             log::debug!("Ignoring stale packet: {}", header.id().0);
             self.stats.packets_stale += 1;
             return Err(PacketeerError::StalePacket);
         }
         // if this packet was already received, reject as duplicate
-        if self.recv_buffer.exists(header.id().0) {
+        if self.received_buffer.exists(header.id().0) {
             log::debug!("Ignoring duplicate packet: {:?}", header.id());
             self.stats.packets_duplicate += 1;
             return Err(PacketeerError::DuplicatePacket);
         }
-        self.recv_buffer.insert(
-            RecvData::new(self.time, self.config.packet_header_size + packet.len()),
+        self.received_buffer.insert(
+            ReceivedMeta::new(self.time, self.config.packet_header_size + packet.len()),
             header.id().0,
         )?;
         self.process_packet_acks_and_rtt(&header);
@@ -533,7 +522,7 @@ impl Packeteer {
     ///
     /// Used in tests only.
     #[allow(unused)]
-    fn sent_info(&self, sent_handle: PacketId) -> Option<&SentData> {
+    fn sent_info(&self, sent_handle: PacketId) -> Option<&SentMeta> {
         self.sent_buffer.get(sent_handle.0)
     }
 }
