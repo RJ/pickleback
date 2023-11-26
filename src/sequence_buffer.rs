@@ -1,5 +1,4 @@
 use crate::PacketeerError;
-use std::num::Wrapping;
 
 pub struct SequenceBuffer<T>
 where
@@ -67,26 +66,14 @@ where
     }
 
     pub fn insert(&mut self, data: T, sequence: u16) -> Result<&mut T, PacketeerError> {
-        if Self::sequence_less_than(
-            sequence,
-            (Wrapping(self.sequence) - Wrapping(self.len() as u16)).0,
-        ) {
-            // too old to insert. rename error to "SequnceTooOld"?
-            log::warn!(
-                "{} Sequence too old to insert: {sequence}",
-                self.type_name()
-            );
+        if Self::sequence_less_than(sequence, self.sequence.wrapping_sub(self.len() as u16)) {
             return Err(PacketeerError::SequenceTooOld);
         }
-        // log::info!("{} Inserting {sequence}..", self.type_name());
-        // are we inserting with a gap in the range? ie new sequence we are inserting at
-        // is more than 1 greater than the current max sequence?
         if Self::sequence_greater_than(sequence, self.sequence) {
-            let first_candidate = (Wrapping(self.sequence) + Wrapping(1)).0;
+            let first_candidate = self.sequence.wrapping_add(1);
             if first_candidate != sequence {
-                self.remove_range(first_candidate..sequence);
+                self.remove_range(first_candidate, sequence);
             }
-
             self.sequence = sequence;
         }
 
@@ -98,18 +85,15 @@ where
         Ok(&mut self.entries[index])
     }
 
-    // TODO: THIS IS INCLUSIVE END
-    pub fn remove_range(&mut self, range: std::ops::Range<u16>) {
-        for i in range.clone() {
-            // log::warn!("{} * Remove {i} ", self.type_name());
+    /// remove items between start and end, inclusive
+    pub fn remove_range(&mut self, start: u16, end: u16) {
+        for i in start..=end {
             self.remove(i);
         }
-        // log::warn!("{} * Remove {} ", self.type_name(), range.end);
-        self.remove(range.end);
     }
 
+    /// removes and returns
     pub fn remove(&mut self, sequence: u16) -> Option<T> {
-        // TODO: validity check
         let index = self.index(sequence);
         let ret = if self.entry_sequences[index] != u32::from(sequence) {
             self.entries[index] = T::default();
@@ -156,11 +140,7 @@ where
 
     #[inline]
     pub fn check_sequence(&self, sequence: u16) -> bool {
-        // Self::sequence_greater_than(sequence, self.sequence)
-        Self::sequence_greater_than(
-            sequence,
-            (Wrapping(self.sequence()) - Wrapping(self.len() as u16)).0,
-        )
+        Self::sequence_greater_than(sequence, self.sequence().wrapping_sub(self.len() as u16))
     }
 }
 

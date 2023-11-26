@@ -1,14 +1,14 @@
 use crate::PacketId;
 
 #[derive(Debug, Clone)]
-pub(crate) struct SentData {
+pub(crate) struct SentMeta {
     pub(crate) time: f64,
     pub(crate) acked: bool,
     pub(crate) size: usize,
     pub(crate) acked_up_to: PacketId,
 }
 
-impl SentData {
+impl SentMeta {
     pub fn new(time: f64, size: usize, acked_up_to: PacketId) -> Self {
         Self {
             time,
@@ -27,7 +27,7 @@ impl SentData {
     }
 }
 
-impl Default for SentData {
+impl Default for SentMeta {
     fn default() -> Self {
         Self {
             time: 0.0,
@@ -40,17 +40,17 @@ impl Default for SentData {
 
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
-pub(crate) struct RecvData {
+pub(crate) struct ReceivedMeta {
     pub(crate) time: f64,
     pub(crate) size: usize,
 }
-impl RecvData {
+impl ReceivedMeta {
     pub fn new(time: f64, size: usize) -> Self {
         Self { time, size }
     }
 }
 
-impl Default for RecvData {
+impl Default for ReceivedMeta {
     fn default() -> Self {
         Self { time: 0.0, size: 0 }
     }

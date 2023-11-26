@@ -1,10 +1,9 @@
 use crate::prelude::PacketeerError;
 use crate::PacketId;
-use crate::RecvData;
+use crate::ReceivedMeta;
 use crate::SequenceBuffer;
 use byteorder::{NetworkEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{Cursor, Write};
-use std::num::Wrapping;
 
 pub(crate) const MAX_ACK_BYTES: u8 = 10; // MAX_ACK_BYTES*7 = num acks.
 pub(crate) const MAX_UNACKED_PACKETS: u16 = 7 * MAX_ACK_BYTES as u16;
@@ -58,7 +57,7 @@ impl Iterator for AckHeader {
         let mask = 1_u8 << self.bit_offset;
         let is_acked = b & mask == mask;
         let seq_offset = 7 * self.byte_offset + self.bit_offset;
-        let sequence = (Wrapping(self.ack_id.0) - Wrapping(seq_offset as u16)).0;
+        let sequence = self.ack_id.0.wrapping_sub(seq_offset as u16);
         if self.bit_offset == 6 {
             if (b & 0b10000000) != 0b10000000 {
                 // no continuation bit, ensure we terminate next time
@@ -157,7 +156,7 @@ impl AckHeader {
 
 /// An iterator of received sequence ids from RecvData SequenceBuffer
 pub(crate) struct AckIter<'a> {
-    seq_buffer: &'a SequenceBuffer<RecvData>,
+    seq_buffer: &'a SequenceBuffer<ReceivedMeta>,
     i: u16,
     max: u16,
 }
@@ -167,7 +166,7 @@ impl<'a> Iterator for AckIter<'a> {
         if self.i >= self.max {
             None
         } else {
-            let sequence = (Wrapping(self.seq_buffer.sequence()) - Wrapping(self.i)).0;
+            let sequence = self.seq_buffer.sequence().wrapping_sub(self.i);
             let exists = self.seq_buffer.exists(sequence);
             self.i += 1;
             Some((sequence, exists))
@@ -178,7 +177,7 @@ impl<'a> AckIter<'a> {
     /// Creates the acks iterator rounded up to the nearest multiple of 7, to fill the available
     /// bitfield in the ack header.
     pub(crate) fn with_minimum_length(
-        seq_buffer: &'a SequenceBuffer<RecvData>,
+        seq_buffer: &'a SequenceBuffer<ReceivedMeta>,
         length: u16,
     ) -> AckIter<'a> {
         let max = (length as f32 / 7.).ceil() as u16 * 7;
@@ -202,7 +201,7 @@ mod tests {
             let start = rand::random::<u16>();
             let mut v = vec![(start, true)];
             for i in 1..len {
-                let id = (Wrapping(start) - Wrapping(i)).0;
+                let id = start.wrapping_sub(i);
                 let is_acked = rand::random::<bool>();
                 v.push((id, is_acked));
             }
