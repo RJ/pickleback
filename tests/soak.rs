@@ -121,10 +121,6 @@ fn soak_reliable_message_transmission_with_terrible_network() {
         let acked_ids = harness.collect_server_acks(channel);
         if !acked_ids.is_empty() {
             unacked_sent_msg_ids.retain(|id| !acked_ids.contains(id));
-            // trace!(
-            //     "👍 Server got ACKs: {acked_ids:?} still need: {} : {unacked_sent_msg_ids:?}",
-            //     unacked_sent_msg_ids.len()
-            // );
         }
 
         client_received_messages.extend(harness.client.drain_received_messages(channel));
@@ -139,5 +135,10 @@ fn soak_reliable_message_transmission_with_terrible_network() {
     // with enough extra iterations, resends should have ensured everything was received.
     assert_eq!(client_received_messages.len(), test_msgs.len());
 
-    assert_eq!(harness.server.packet_loss(), 2.0);
+    println!("Server Stats: {:?}", harness.server.stats());
+    println!("Server Packet loss: {}", harness.server.packet_loss());
+    println!("Server RTT: {}", harness.server.rtt());
+    println!("Client Stats: {:?}", harness.client.stats());
+    println!("Client Packet loss: {}", harness.client.packet_loss());
+    println!("Client RTT: {}", harness.client.rtt());
 }

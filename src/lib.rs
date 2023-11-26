@@ -530,9 +530,7 @@ impl Packeteer {
 
     /// Calculates packet loss by checking to see which packets sent longer ago than RTT*1.1 haven't
     /// been acked.
-    ///
-    ///
-    pub fn update_packet_loss_calculation(&mut self) {
+    fn update_packet_loss_calculation(&mut self) {
         // give a 10% buffer to rtt, only check for acks on packets sent longer ago than this.
         let sent_time_cutoff = self.time - self.rtt as f64 * 1.1;
         let mut num_acked = 0;
