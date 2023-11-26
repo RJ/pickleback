@@ -58,10 +58,14 @@ pub mod testing {
 #[derive(Debug, Eq, PartialEq, Hash, Clone, Copy, PartialOrd, Ord, Default)]
 pub(crate) struct PacketId(pub(crate) u16);
 
+/// every N packets, we recaluclate packet loss. N is:
+const PACKET_LOSS_RECALCULATE_INTERVAL: u16 = 10;
+
 /// An instance of Packeteer represents one of the two endpoints at either side of a link
 pub struct Packeteer {
     time: f64,
     rtt: f32,
+    packet_loss: f32,
     config: PacketeerConfig,
     sequence_id: u16,
     newest_ack: Option<u16>,
@@ -102,6 +106,7 @@ impl Packeteer {
         Self {
             time,
             rtt: 0.0,
+            packet_loss: 0.0,
             config: config.clone(),
             sequence_id: 0,
             newest_ack: None,
@@ -120,6 +125,18 @@ impl Packeteer {
     #[allow(unused)]
     pub fn stats(&self) -> &PacketeerStats {
         &self.stats
+    }
+
+    /// Round-trip-time estimation in seconds.
+    #[allow(unused)]
+    pub fn rtt(&self) -> f32 {
+        self.rtt
+    }
+
+    /// Packet loss estimation percent.
+    #[allow(unused)]
+    pub fn packet_loss(&self) -> f32 {
+        self.packet_loss
     }
 
     /// Draining iterator over packets in the outbox that we need to send over the network.
@@ -506,6 +523,41 @@ impl Packeteer {
                 }
             }
         }
+        if self.sequence_id % PACKET_LOSS_RECALCULATE_INTERVAL == 0 {
+            self.update_packet_loss_calculation();
+        }
+    }
+
+    /// Calculates packet loss by checking to see which packets sent longer ago than RTT*1.1 haven't
+    /// been acked.
+    ///
+    ///
+    pub fn update_packet_loss_calculation(&mut self) {
+        // give a 10% buffer to rtt, only check for acks on packets sent longer ago than this.
+        let sent_time_cutoff = self.time - self.rtt as f64 * 1.1;
+        let mut num_acked = 0;
+        let mut num_sampled = 0;
+        let mut seq = self.sent_buffer.sequence();
+        while let Some(meta) = self.sent_buffer.get(seq) {
+            seq = seq.wrapping_sub(1);
+            if meta.time > sent_time_cutoff {
+                continue;
+            }
+            num_sampled += 1;
+            if meta.acked() {
+                num_acked += 1;
+            }
+            if num_sampled == PACKET_LOSS_RECALCULATE_INTERVAL {
+                break;
+            }
+        }
+        if num_sampled == 0 {
+            warn!("Couldn't calculate packet loss, no samples");
+            return;
+        }
+        let loss = 1.0 - num_acked as f32 / num_sampled as f32;
+        self.packet_loss = self.packet_loss
+            + ((loss - self.packet_loss) * self.config.packet_loss_smoothing_factor);
     }
 
     // used by tests

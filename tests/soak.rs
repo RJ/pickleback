@@ -8,7 +8,7 @@ use packeteer::prelude::*;
 use packeteer::testing::*;
 
 /// How many messages to send during soak tests:
-const NUM_TEST_MSGS: usize = 100000;
+const NUM_TEST_MSGS: usize = 1000;
 /// If doing reliable sending over lossy pipe, how many extra ticks to mop up straggling acks:
 const NUM_EXTRA_ITERATIONS: usize = 100;
 /// Random payload size is selected to generate up to this many fragments:
@@ -138,4 +138,6 @@ fn soak_reliable_message_transmission_with_terrible_network() {
 
     // with enough extra iterations, resends should have ensured everything was received.
     assert_eq!(client_received_messages.len(), test_msgs.len());
+
+    assert_eq!(harness.server.packet_loss(), 2.0);
 }

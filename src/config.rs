@@ -22,10 +22,12 @@ pub struct PacketeerConfig {
     /// ack field sent to the remote endpoint.
     /// Also the number of previous packets we retain message-id mappings for, for acks.
     pub received_packets_buffer_size: usize,
-    /// A newly calculated rtt is blended with the existing rtt using this smoothing factor between 0-1
+    /// A newly calculated rtt is blended with the existing value using this smoothing factor between 0-1
     /// to avoid large jumps.
     pub rtt_smoothing_factor: f32,
-    // pub packet_loss_smoothing_factor: f32,
+    /// A newly calculated packet loss is blended with the existing value using this smoothing factor between 0-1
+    /// to avoid large jumps.
+    pub packet_loss_smoothing_factor: f32,
     // pub bandwidth_smoothing_factor: f32,
     /// An estimate of the header size used to transmit packets, used to calculate true bandwidth usage.
     /// UDP over IPv4 is ~28, and UDP over IPv6 is ~48.
@@ -57,6 +59,7 @@ impl Default for PacketeerConfig {
             received_packets_buffer_size: 512,
             rtt_smoothing_factor: 0.0025,
             packet_header_size: 28,
+            packet_loss_smoothing_factor: 0.01,
             sent_frag_map_size: 25000,
         }
     }

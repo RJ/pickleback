@@ -77,10 +77,10 @@ assert_eq!(vec![msg_id], server.drain_message_acks(channel).collect::<Vec<_>>())
 
 Packets consist of a sequence number, an ack header, and a payload.
 
-The ack header acknowledges receipt of the last few packets received from the remote endpoint.
+The ack header acknowledges receipt of the last N packets received from the remote endpoint.
 
 Packet payloads consist of one or more messages. Messages can be any size, and large messages are
-fragmented into 1024 byte fragment-messages.
+fragmented into 1024 byte fragment-messages, and reassembled for you.
 
 When you call `send_message` you get a `MessageId`. Once the packet your message was delivered in is
 acked, you receive an ack for your `MessageId`. Unreliable channels also get acks (except if packets are lost).
@@ -90,8 +90,20 @@ and the messages was reassembled successfully.
 
 Reliable channels will retransmit messages that remain unacked for a configurable duration.
 
+Messages are retransmitted, packets are not. ie as-yet unacked reliable mesages will be included in
+new future packets until such time as they get acked.
+
+### Message Size
+
+Arbitrarily limited to 1024 fragments of 1024B, so 1MB maximum messages size.
+
+Remember, as the number of fragments increases, the effects of packet loss are amplified.
+
+10 fragments at 1% packet loss = 1 - (0.99^10) = 9.6% chance of losing a fragment.
+
+
 
 ### Provenance
 * [Gaffer articles](https://gafferongames.com/post/reliable_ordered_messages/) (building network protocol, packet acking, sequence buffer, etc)
 * [netcode.io rust code](https://github.com/jaynus/netcode.io/tree/master) (implementation of gaffer concepts)
-* 
+  
