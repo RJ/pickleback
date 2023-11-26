@@ -240,16 +240,21 @@ impl Message {
         channel: u8,
         payload_len: usize,
     ) -> Result<(), PacketeerError> {
+        // three bits are reserved for flags:
+        // * is fragment?
+        // * size mode large?
+        // * unused flag
+        // remaining bits are channel id.
         let mut prefix_byte = 0_u8;
         if fragment.is_some() {
-            prefix_byte = 1;
+            prefix_byte = 0b0000_0001;
         }
         if size_mode == MessageSizeMode::Large {
-            prefix_byte |= 1 << 1;
+            prefix_byte |= 0b0000_0010;
         }
         // // spare flag
         // if flag_true {
-        //     prefix_byte |= 1 << 2;
+        //     prefix_byte |= 0b0000_0100;
         // }
         let channel_mask = channel << 3;
         prefix_byte |= channel_mask;

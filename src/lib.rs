@@ -2,7 +2,6 @@
 #![doc = include_str!("../README.md")]
 
 use cursor::{BufferLimitedWriter, CursorExtras};
-///
 use log::*;
 use std::{
     collections::{HashMap, VecDeque},
@@ -21,7 +20,7 @@ mod message_reassembler;
 mod packet;
 mod received_message;
 mod sequence_buffer;
-pub mod test_utils;
+mod test_utils;
 mod tracking;
 
 use ack_header::*;
@@ -40,13 +39,19 @@ use tracking::*;
 
 /// Easy importing of all the important bits
 pub mod prelude {
+    pub use super::buffer_pool::PoolConfig;
     pub use super::config::PacketeerConfig;
     pub use super::error::{Backpressure, PacketeerError};
-    pub use super::jitter_pipe::JitterPipeConfig;
     pub use super::message::MessageId;
     pub use super::received_message::ReceivedMessage;
     pub use super::tracking::PacketeerStats;
     pub use super::Packeteer;
+}
+
+/// Things needed for integration tests
+pub mod testing {
+    pub use super::jitter_pipe::JitterPipeConfig;
+    pub use super::test_utils::*;
 }
 
 /// Identifies a packet - contains sequence number
@@ -89,6 +94,11 @@ impl Packeteer {
         let mut channels = ChannelList::default();
         channels.insert(Channel::from(UnreliableChannel::new(0, time)));
         channels.insert(Channel::from(ReliableChannel::new(1, time)));
+        let pool = if let Some(buffer_pools_config) = &config.buffer_pools_config {
+            BufPool::new(buffer_pools_config.clone())
+        } else {
+            BufPool::default()
+        };
         Self {
             time,
             rtt: 0.0,
@@ -102,7 +112,7 @@ impl Packeteer {
             stats: PacketeerStats::default(),
             outbox: VecDeque::new(),
             channels,
-            pool: BufPool::default(),
+            pool,
         }
     }
 
@@ -355,8 +365,8 @@ impl Packeteer {
         // telling us we don't need to bother acking anything prior to this id in future packets.
         let acking_up_to = self.received_buffer.sequence();
         self.sent_buffer.insert(
-            SentMeta::new(self.time, send_size, PacketId(acking_up_to)),
             self.sequence_id,
+            SentMeta::new(self.time, send_size, PacketId(acking_up_to)),
         )?;
         self.outbox.push_back(packet);
         self.stats.packets_sent += 1;
@@ -415,8 +425,8 @@ impl Packeteer {
             return Err(PacketeerError::DuplicatePacket);
         }
         self.received_buffer.insert(
-            ReceivedMeta::new(self.time, self.config.packet_header_size + packet.len()),
             header.id().0,
+            ReceivedMeta::new(self.time, self.config.packet_header_size + packet.len()),
         )?;
         self.process_packet_acks_and_rtt(&header);
         self.process_packet_messages(&mut reader)?;
@@ -681,7 +691,7 @@ mod tests {
 
         for i in 0..TEST_BUFFER_SIZE * 4 {
             buffer
-                .insert(TestData { sequence: i as u16 }, i as u16)
+                .insert(i as u16, TestData { sequence: i as u16 })
                 .unwrap();
             assert_eq!(buffer.sequence(), i as u16);
 
@@ -690,7 +700,7 @@ mod tests {
         }
 
         for i in 0..TEST_BUFFER_SIZE - 1 {
-            let r = buffer.insert(TestData { sequence: i as u16 }, i as u16);
+            let r = buffer.insert(i as u16, TestData { sequence: i as u16 });
             assert!(r.is_err());
         }
 

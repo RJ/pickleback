@@ -34,6 +34,7 @@ pub struct TransmissionStats {
     pub client_received: u32,
 }
 
+/// A test harness that creates two Packeteer endpoints, and "connects" them via JitterPipes
 pub struct TestHarness {
     pub server: Packeteer,
     pub client: Packeteer,

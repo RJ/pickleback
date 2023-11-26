@@ -1,13 +1,17 @@
 use lifeguard::*;
 
+/// Configure a pool of buffers for internal use
 #[derive(Copy, Clone)]
 pub struct PoolConfig {
+    /// How many buffers to preallocate and fill the pool with on startup
     starting_size: usize,
+    /// Maximum size of the pool before returned buffers are dropped
     max_size: usize,
+    /// Size to pass to Vec::with_capacity when creating a new underlying buffer for this pool
     buffer_capacity: usize,
 }
 
-pub type BufHandle = RcRecycled<Vec<u8>>;
+pub(crate) type BufHandle = RcRecycled<Vec<u8>>;
 
 /// `BufPool` manages multiple pools of Vec<u8> buffers, with varying capacities.
 /// When you request a pooled buffer, you ask for something with a certain minimum capacity,

@@ -46,7 +46,7 @@ impl MessageDispatcher {
         };
 
         if let Some(msg) = received_msg {
-            info!("✅ Adding msg to inbox");
+            trace!("✅ Adding msg to inbox");
             self.message_inbox
                 .entry(msg.channel())
                 .or_default()
@@ -75,7 +75,7 @@ impl MessageDispatcher {
     ) -> Result<(), PacketeerError> {
         info!(">>> {packet_handle:?} CONTAINS msg ids: {message_handles:?}");
         self.messages_in_packets
-            .insert(message_handles, packet_handle.0)?;
+            .insert(packet_handle.0, message_handles)?;
         Ok(())
     }
 
@@ -94,11 +94,10 @@ impl MessageDispatcher {
                     .message_ack_received(msg_handle);
                 if let Some(parent_id) = msg_handle.parent_id() {
                     // fragment message
-                    if self.sent_frag_map.ack_fragment_message(
-                        parent_id,
-                        msg_handle.id(), // .frag_index
-                                         // .expect("used to calc parent id, so must exist"),
-                    ) {
+                    if self
+                        .sent_frag_map
+                        .ack_fragment_message(parent_id, msg_handle.id())
+                    {
                         self.ack_inbox
                             .entry(msg_handle.channel)
                             .or_default()
@@ -139,7 +138,6 @@ impl MessageDispatcher {
         payload: &[u8],
     ) -> Result<MessageId, PacketeerError> {
         assert!(payload.len() > 1024);
-        // all fragments use the same message id.
         let full_payload_size = payload.len();
         // split into multiple messages.
         // each fragment has a unique message id, but due to sequential allocation you can always
@@ -163,7 +161,7 @@ impl MessageDispatcher {
                 id = self.next_message_id();
             }
             frag_ids.push(id);
-            info!("Adding frag msg {id:?} frag:{index}/{num_fragments}");
+            trace!("Adding frag msg {id:?} frag:{index}/{num_fragments}");
             let fragment = Fragment {
                 index,
                 num_fragments,
@@ -195,7 +193,7 @@ pub(crate) enum FragAckStatus {
     Partial(Vec<MessageId>),
 }
 
-/// SendFragMap tracks the unacked message ids assigned to fragments of a larger message id we sent.
+/// SentFragMap tracks the unacked message ids assigned to fragments of a larger message id we sent.
 /// They're removed as they are acked & once depleted, the original parent message id is acked.
 pub struct SentFragMap {
     m: SequenceBuffer<FragAckStatus>,
@@ -212,7 +210,7 @@ impl SentFragMap {
         id: MessageId,
         fragment_ids: Vec<MessageId>,
     ) -> Result<(), PacketeerError> {
-        match self.m.insert(FragAckStatus::Partial(fragment_ids), id.0) {
+        match self.m.insert(id.0, FragAckStatus::Partial(fragment_ids)) {
             Ok(_) => Ok(()),
             Err(e) => Err(e),
         }
@@ -238,7 +236,7 @@ impl SentFragMap {
             }
         };
         if ret {
-            self.m.insert(FragAckStatus::Complete, parent_id.0).unwrap();
+            self.m.insert(parent_id.0, FragAckStatus::Complete).unwrap();
             trace!("Message fully acked, all fragments accounted for {parent_id:?}");
         }
         ret

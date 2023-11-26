@@ -1,5 +1,9 @@
 use crate::PacketeerError;
-
+/// SequenceBuffer as described here: https://gafferongames.com/post/packet_fragmentation_and_reassembly/
+///
+/// Other similar implementations:
+/// * https://github.com/naia-lib/naia/blob/main/shared/src/connection/sequence_buffer.rs
+/// * https://github.com/jaynus/reliable.io/blob/master/rust/src/sequence_buffer.rs
 pub struct SequenceBuffer<T>
 where
     T: Default + std::clone::Clone + Send + Sync,
@@ -7,7 +11,6 @@ where
     entries: Vec<T>,
     entry_sequences: Vec<u32>,
     sequence: u16,
-    // size: usize,
 }
 
 impl<T> SequenceBuffer<T>
@@ -23,24 +26,15 @@ where
 
         Self {
             sequence: 0,
-            // size,
             entries,
             entry_sequences,
         }
     }
 
+    #[allow(unused)]
     fn type_name(&self) -> &str {
         std::any::type_name::<T>()
     }
-
-    // #[allow(unused)]
-    // pub fn reset(&mut self) {
-    //     self.sequence = 0;
-    //     self.entries.clear();
-    //     for e in &mut self.entry_sequences {
-    //         *e = 0;
-    //     }
-    // }
 
     pub fn exists(&self, sequence: u16) -> bool {
         let index = self.index(sequence);
@@ -52,20 +46,18 @@ where
         if self.entry_sequences[index] != u32::from(sequence) {
             return None;
         }
-
         Some(&self.entries[index])
     }
+
     pub fn get_mut(&mut self, sequence: u16) -> Option<&mut T> {
         let index = self.index(sequence);
-
         if self.entry_sequences[index] != u32::from(sequence) {
             return None;
         }
-
         Some(&mut self.entries[index])
     }
 
-    pub fn insert(&mut self, data: T, sequence: u16) -> Result<&mut T, PacketeerError> {
+    pub fn insert(&mut self, sequence: u16, data: T) -> Result<&mut T, PacketeerError> {
         if Self::sequence_less_than(sequence, self.sequence.wrapping_sub(self.len() as u16)) {
             return Err(PacketeerError::SequenceTooOld);
         }
@@ -76,12 +68,9 @@ where
             }
             self.sequence = sequence;
         }
-
         let index = self.index(sequence);
-
         self.entries[index] = data;
         self.entry_sequences[index] = u32::from(sequence);
-
         Ok(&mut self.entries[index])
     }
 
@@ -106,6 +95,7 @@ where
         ret
     }
 
+    /// current greatest inserted sequence
     pub fn sequence(&self) -> u16 {
         self.sequence
     }

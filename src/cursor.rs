@@ -3,6 +3,7 @@ use std::io::{self, Write};
 
 pub(crate) type BufferLimitedWriter<'a> = WriteLimiter<Cursor<&'a mut Vec<u8>>>;
 
+/// Limits a Writer to a max number of bytes
 pub(crate) struct WriteLimiter<W: Write> {
     writer: W,
     limit: usize,
@@ -46,7 +47,8 @@ impl<W: Write> Write for WriteLimiter<W> {
     }
 }
 
-// This can be deleted once rust's #![feature(cursor_remaining)] is stable.
+/// This can be deleted once rust's #![feature(cursor_remaining)] is stable.
+/// When writing packets, we use the cursor's remaining() fn to check remaining packet space.
 pub(crate) trait CursorExtras {
     fn remaining(&self) -> u64;
     fn remaining_slice(&self) -> &[u8];

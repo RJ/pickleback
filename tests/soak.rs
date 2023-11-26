@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 
 use log::*;
 use packeteer::prelude::*;
-use packeteer::test_utils::*;
+use packeteer::testing::*;
 
 /// How many messages to send during soak tests:
 const NUM_TEST_MSGS: usize = 100000;
