@@ -88,14 +88,3 @@ impl ReceivedMessage {
         ret
     }
 }
-
-// impl std::fmt::Debug for ReceivedMessage {
-//     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-//         write!(
-//             f,
-//             "ReceivedMessage{{id: {}, channel: {}}}",
-//             self.id(),
-//             self.channel(),
-//         )
-//     }
-// }

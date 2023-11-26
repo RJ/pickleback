@@ -1,12 +1,15 @@
 use crate::*;
 use enum_dispatch::*;
 
+/// We use 5 bits from the message prefix byte to encode the channel id:
 pub const MAX_CHANNELS: usize = 32;
 
 #[enum_dispatch]
 pub(crate) trait ChannelT {
     fn id(&self) -> u8;
+    /// Update the channel clock. Necessary so it knows when to retransmit.
     fn update(&mut self, time: f64);
+    /// Any messages ready to send in the next packet?
     fn any_ready_to_send(&self) -> bool;
     /// enqueue a message to be sent in an outbound packet
     fn enqueue_message(
@@ -62,7 +65,7 @@ impl ChannelT for UnreliableChannel {
             // warn!("Rejecting already seen message on channel {msg:?}");
             return false;
         }
-        match self.seen_buf.insert(true, msg.id().0) {
+        match self.seen_buf.insert(msg.id().0, true) {
             Ok(_) => true,
             Err(e) => {
                 warn!("not accepting message {msg:?} = {e:?}");
@@ -165,7 +168,7 @@ impl ChannelT for ReliableChannel {
             // warn!("Rejecting already seen message on channel {msg:?}");
             return false;
         }
-        match self.seen_buf.insert(true, msg.id().0) {
+        match self.seen_buf.insert(msg.id().0, true) {
             Ok(_) => true,
             Err(e) => {
                 warn!("not accepting message {msg:?} = {e:?}");

@@ -1,5 +1,7 @@
 use crate::*;
 
+/// With a fragment size of 1kB, this gives 1MB.
+/// Totally arbitrary, but anything more than this should probably be transferred by other means?
 pub const MAX_FRAGMENTS: usize = 1024;
 
 /// Represents a mesage being assembled from fragments.
@@ -18,7 +20,7 @@ impl IncompleteMessage {
     pub(crate) fn new(num_fragments: u16) -> Self {
         assert!(
             num_fragments as usize <= MAX_FRAGMENTS,
-            "num fragments can't exceed 1024 for arbitrary reasons atm"
+            "num fragments exceeded"
         );
         assert!(
             num_fragments > 1,
@@ -62,6 +64,14 @@ impl MessageReassembler {
         let Some(fragment) = message.fragment() else {
             panic!("don't pass unfragmented messages to the message reassembler!");
         };
+
+        if fragment.num_fragments > MAX_FRAGMENTS as u16 {
+            error!(
+                "Num fragments ({}) exceeds the max: {MAX_FRAGMENTS}",
+                fragment.num_fragments
+            );
+            return None;
+        }
 
         let parent_id = message
             .fragment()

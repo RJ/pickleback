@@ -1,8 +1,16 @@
+use crate::message_reassembler::MAX_FRAGMENTS;
+
 /// Various tunables. Mostly buffer sizes.
 #[derive(Clone)]
 pub struct PacketeerConfig {
+    /// Optionally specify buffer pool sizes and capacities.
+    /// Default value of None will give sane defaults.
+    /// see [`BufPool`]
+    pub buffer_pools_config: Option<Vec<crate::buffer_pool::PoolConfig>>,
     /// Maximum size of a message payload.
     /// Messages larger than `max_packet_size` are automatically fragmented
+    /// NB: at the mo, MAX_FRAGMENTS is hardcoded, so this must not exceed
+    ///     MAX_FRAGMENTS * 1024 !
     pub max_message_size: usize,
     /// Max size of a packet you can send without fragmenting. ~1200 bytes or so.
     pub max_packet_size: usize,
@@ -42,7 +50,8 @@ pub struct PacketeerConfig {
 impl Default for PacketeerConfig {
     fn default() -> Self {
         Self {
-            max_message_size: 1024 * 1024,
+            buffer_pools_config: None,
+            max_message_size: 1024 * MAX_FRAGMENTS,
             max_packet_size: 1150,
             sent_packets_buffer_size: 512,
             received_packets_buffer_size: 512,
