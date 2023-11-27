@@ -72,7 +72,7 @@ impl ReceivedMessage {
             }
         }
     }
-    /// Read payload cursor into a new Vec<u8> and return it.
+    /// Read payload cursor into a new `Vec<u8>` and return it.
     ///
     /// This is for unit tests
     ///

@@ -5,7 +5,6 @@ use crate::message_reassembler::MAX_FRAGMENTS;
 pub struct PacketeerConfig {
     /// Optionally specify buffer pool sizes and capacities.
     /// Default value of None will give sane defaults.
-    /// see [`BufPool`]
     pub buffer_pools_config: Option<Vec<crate::buffer_pool::PoolConfig>>,
     /// Maximum size of a message payload.
     /// Messages larger than `max_packet_size` are automatically fragmented
@@ -59,7 +58,7 @@ impl Default for PacketeerConfig {
             received_packets_buffer_size: 512,
             rtt_smoothing_factor: 0.0025,
             packet_header_size: 28,
-            packet_loss_smoothing_factor: 0.01,
+            packet_loss_smoothing_factor: 0.5,
             sent_frag_map_size: 25000,
         }
     }

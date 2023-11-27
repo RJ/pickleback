@@ -120,7 +120,6 @@ impl std::fmt::Debug for Message {
         )
     }
 }
-// TODO pool holds messages, and they get a builder style api to construct once issued?
 
 // Payloads > 255 bytes need more than a `u8` size prefix
 impl From<usize> for MessageSizeMode {
@@ -284,7 +283,7 @@ impl Message {
         // let spare_flag = prefix_byte & (1 << 2) != 0
         let id = MessageId(reader.read_u16::<NetworkEndian>()?);
         let channel = prefix_byte >> 3;
-        // TODO refac into MessageHeader which has an opt fragment and does the parsing?
+
         let (fragment, payload_size) = if !fragmented {
             let payload_size = match size_mode {
                 MessageSizeMode::Small => reader.read_u8()? as u16,

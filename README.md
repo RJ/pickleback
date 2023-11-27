@@ -2,7 +2,14 @@
 
 A way to multiplex and coalesce messages over an unreliable stream of datagrams, for game netcode.
 
-Typically you hook this up to UDP sockets; this crate has no networking built-in.
+It's expected this will be hooked up to UDP sockets; this crate has no networking built-in.
+
+### Current Status
+
+Under development. I'm RJ on bevy's Discord if you want to discuss.
+
+There is no real protocol, concept of sessions, security features, or anything like that at the moment.
+This is just the base reliability layer.
 
 ## Design Goals
 
@@ -10,7 +17,8 @@ To support multiplayer games where most updates are sent in an unreliable fashio
 requirements for reliable ordered messages, such as for in-game chat and on-join state synchronization.
 
 A regular exchange of packets in both directions is expected. In practice this means a packet will
-be sent in each direction ~60 times a second even if there are no explicit messages to transmit.
+be sent in each direction at least 20 times a second even if there are no explicit messages to transmit.
+
 
 ## Features
 
@@ -22,11 +30,12 @@ be sent in each direction ~60 times a second even if there are no explicit messa
 - [x] Internal pool of buffers for messages and packets, to minimise allocations
 - [x] No async: designed to integrate into your existing game loop. Call it each tick.
 - [x] Unit tests and integration / soak tests with bad-link simulator that drops, dupes, & reorders packets.
-- [x] Calculates rtt
-- [ ] Calculate packet loss estimate
+- [x] Calculates rtt (need to verify outside of test harness)
+- [x] Calculate packet loss estimate (need to verify outside of test harness)
+- [ ] Enforce ordering on ordered channels (currently only reliability is supported)
 - [ ] Bandwidth tracking and budgeting
 - [ ] Allow configuration of channels and channel settings (1 reliable, 1 unreliable only atm)
-- [ ] Ordering of channels for selecting messages to send
+- [ ] Prioritising channels when selecting messages to send. Low volume reliables first?
 - [ ] Example using bevy and an unreliable transport mechanism.
 - [ ] Benchmarks, including with and without pooled buffers.
 
@@ -85,8 +94,8 @@ fragmented into 1024 byte fragment-messages, and reassembled for you.
 When you call `send_message` you get a `MessageId`. Once the packet your message was delivered in is
 acked, you receive an ack for your `MessageId`. Unreliable channels also get acks (except if packets are lost).
 
-When sending a message larger than 1024 bytes, you get the ack after every fragment has been delivered,
-and the messages was reassembled successfully.
+When sending a message larger than 1024 bytes, you get the ack after all fragments have been delivered,
+and the message was reassembled successfully.
 
 Reliable channels will retransmit messages that remain unacked for a configurable duration.
 

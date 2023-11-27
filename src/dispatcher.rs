@@ -73,7 +73,7 @@ impl MessageDispatcher {
         packet_handle: PacketId,
         message_handles: Vec<MessageHandle>,
     ) -> Result<(), PacketeerError> {
-        info!(">>> {packet_handle:?} CONTAINS msg ids: {message_handles:?}");
+        trace!(">>> {packet_handle:?} CONTAINS msg ids: {message_handles:?}");
         self.messages_in_packets
             .insert(packet_handle.0, message_handles)?;
         Ok(())
@@ -85,7 +85,7 @@ impl MessageDispatcher {
         // check message handles that were just acked - if any are fragments, we need to log that
         // in the frag map, incase it results in a parent message id being acked (ie, all frag messages are now acked)
         if let Some(msg_handles) = self.messages_in_packets.remove(packet_handle.0) {
-            info!("Acked packet: {packet_handle:?} --> acked msgs: {msg_handles:?}");
+            trace!("Acked packet: {packet_handle:?} --> acked msgs: {msg_handles:?}");
             for msg_handle in &msg_handles {
                 // let channel know, so it doesn't retransmit this message:
                 channel_list
@@ -103,7 +103,7 @@ impl MessageDispatcher {
                             .or_default()
                             .push(parent_id);
                     } else {
-                        info!("got fragment ack for parent {parent_id:?}, but not all yet {msg_handle:?} ");
+                        trace!("got fragment ack for parent {parent_id:?}, but not all yet {msg_handle:?} ");
                     }
                 } else {
                     // non-fragment messages directly map to an acked message
