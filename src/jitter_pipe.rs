@@ -32,7 +32,8 @@ impl Default for JitterPipeConfig {
 }
 
 impl JitterPipeConfig {
-    /// Pretty bad, but not terrible.
+    /// Bad - 5% loss, 0.5% dupe, occasional reordering
+    /// Tell your housemate to stop torrenting.
     pub fn bad() -> Self {
         Self {
             enabled: true,
@@ -41,13 +42,25 @@ impl JitterPipeConfig {
             max_jitter: 2.0,
         }
     }
-    /// Insert shittiest-ISP pun here
-    pub fn terrible() -> Self {
+    /// Terrible - 10% loss, 1% dupes, some jitter
+    /// Write your ISP a strongly worded letter.
+    pub fn very_bad() -> Self {
         Self {
             enabled: true,
-            drop_chance: 0.075,
+            drop_chance: 0.1,
             duplicate_chance: 0.01,
-            max_jitter: 5.0,
+            max_jitter: 3.0,
+        }
+    }
+
+    /// FML - 30% loss, 4% dupes, large jitter
+    /// Change ISPs without delay, and go for a walk.
+    pub fn very_very_bad() -> Self {
+        Self {
+            enabled: true,
+            drop_chance: 0.3,
+            duplicate_chance: 0.04,
+            max_jitter: 12.0,
         }
     }
 
@@ -69,7 +82,12 @@ impl JitterPipeConfig {
         if !self.enabled {
             return 0.0;
         }
-        rand::random::<f32>() * 2.0 * self.max_jitter - self.max_jitter
+        let j = rand::random::<f32>() * self.max_jitter;
+        if rand::random::<bool>() {
+            j
+        } else {
+            -j
+        }
     }
 }
 

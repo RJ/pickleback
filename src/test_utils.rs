@@ -9,7 +9,7 @@ use crate::*;
 pub fn init_logger() {
     let _ = env_logger::builder()
         .write_style(env_logger::WriteStyle::Always)
-        .is_test(true)
+        // .is_test(true)
         .try_init();
 }
 
@@ -26,7 +26,7 @@ pub fn random_payload(size: u32) -> Vec<u8> {
     b
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct TransmissionStats {
     pub server_sent: u32,
     pub server_received: u32,
@@ -41,6 +41,7 @@ pub struct TestHarness {
     pub server_jitter_pipe: JitterPipe<BufHandle>,
     pub client_jitter_pipe: JitterPipe<BufHandle>,
     server_drop_indices: Option<Vec<u32>>,
+    pub stats: TransmissionStats,
 }
 impl TestHarness {
     pub fn new(config: JitterPipeConfig) -> Self {
@@ -54,6 +55,7 @@ impl TestHarness {
             server_jitter_pipe,
             client_jitter_pipe,
             server_drop_indices: None,
+            stats: TransmissionStats::default(),
         }
     }
     pub fn collect_client_acks(&mut self, channel: u8) -> Vec<MessageId> {
@@ -79,15 +81,15 @@ impl TestHarness {
         &mut self,
         dt: f64,
         drop_indices: Vec<u32>,
-    ) -> TransmissionStats {
+    ) -> &TransmissionStats {
         self.server_drop_indices = Some(drop_indices);
-        let ret = self.advance(dt);
+        self.advance(dt);
         self.server_drop_indices = None;
-        ret
+        &self.stats
     }
     /// advances time, then advances the server first, then client.
     /// Transmits S2C and C2S messages via configured jitter pipes.
-    pub fn advance(&mut self, dt: f64) -> TransmissionStats {
+    pub fn advance(&mut self, dt: f64) -> &TransmissionStats {
         info!("🟡 server.update({dt}) --> {} ----", self.server.time + dt);
         self.server.update(dt);
         info!("🟠 client.update({dt}) --> {} ----", self.server.time + dt);
@@ -126,11 +128,11 @@ impl TestHarness {
             self.server.process_incoming_packet(p.as_ref());
         }
 
-        TransmissionStats {
-            server_received,
-            server_sent,
-            client_received,
-            client_sent,
-        }
+        self.stats.server_received += server_received;
+        self.stats.server_sent += server_sent;
+        self.stats.client_received += client_received;
+        self.stats.client_sent += client_sent;
+
+        &self.stats
     }
 }

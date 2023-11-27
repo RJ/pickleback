@@ -132,6 +132,12 @@ where
     pub fn check_sequence(&self, sequence: u16) -> bool {
         Self::sequence_greater_than(sequence, self.sequence().wrapping_sub(self.len() as u16))
     }
+
+    /// in ordered channels we would reject unfragmented packets that arrived late
+    #[inline]
+    pub fn check_newer_than_current(&self, sequence: u16) -> bool {
+        Self::sequence_greater_than(sequence, self.sequence())
+    }
 }
 
 #[cfg(test)]

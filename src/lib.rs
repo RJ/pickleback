@@ -1,5 +1,6 @@
 #![warn(missing_docs, clippy::missing_errors_doc, clippy::missing_panics_doc)]
 #![doc = include_str!("../README.md")]
+#![deny(rustdoc::broken_intra_doc_links)]
 
 use cursor::{BufferLimitedWriter, CursorExtras};
 use log::*;
@@ -52,6 +53,7 @@ pub mod prelude {
 pub mod testing {
     pub use super::jitter_pipe::JitterPipeConfig;
     pub use super::test_utils::*;
+    pub use assert_float_eq::*;
 }
 
 /// Identifies a packet - contains sequence number
@@ -59,7 +61,7 @@ pub mod testing {
 pub(crate) struct PacketId(pub(crate) u16);
 
 /// every N packets, we recaluclate packet loss. N is:
-const PACKET_LOSS_RECALCULATE_INTERVAL: u16 = 10;
+const PACKET_LOSS_RECALCULATE_INTERVAL: u16 = 100;
 
 /// An instance of Packeteer represents one of the two endpoints at either side of a link
 pub struct Packeteer {
@@ -236,10 +238,9 @@ impl Packeteer {
         self.sequence_id = self.sequence_id.wrapping_add(1);
         let id = PacketId(self.sequence_id);
         let num_acks_required = self.received_unacked_packets();
-
-        info!("Num acks required in packet id {id:?} = {num_acks_required}");
-
+        // info!("Num acks required in packet id {id:?} = {num_acks_required}");
         if num_acks_required > MAX_UNACKED_PACKETS {
+            warn!("Not composing packet, backpressure.");
             return Err(PacketeerError::Backpressure(Backpressure::TooManyPending));
         }
         if num_acks_required == 0 {
@@ -247,7 +248,6 @@ impl Packeteer {
         } else {
             let ack_iter = AckIter::with_minimum_length(&self.received_buffer, num_acks_required);
             let ret = PacketHeader::new(id, ack_iter, num_acks_required)?;
-            info!("Packetheader: {ret:?}");
             Ok(ret)
         }
     }
@@ -429,12 +429,21 @@ impl Packeteer {
             header.id(),
             header.ack_id(),
         );
-        // if this packet sequence is out of range, reject as stale
+        // if this packet sequence is out of buffer range, reject as stale
         if !self.received_buffer.check_sequence(header.id().0) {
             log::debug!("Ignoring stale packet: {}", header.id().0);
             self.stats.packets_stale += 1;
             return Err(PacketeerError::StalePacket);
         }
+
+        // TODO we can only reject older sequence numbers for unreliable unfragmented messages atm
+        // perhaps we need to delegate some checks to channels by passing the packetheader in?
+        if !self.received_buffer.check_newer_than_current(header.id().0) {
+            // log::debug!("Ignoring stale packet: {}", header.id().0);
+            // self.stats.packets_stale += 1;
+            // return Err(PacketeerError::StalePacket);
+        }
+
         // if this packet was already received, reject as duplicate
         if self.received_buffer.exists(header.id().0) {
             log::debug!("Ignoring duplicate packet: {:?}", header.id());

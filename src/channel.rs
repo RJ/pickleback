@@ -61,6 +61,7 @@ impl ChannelT for UnreliableChannel {
             warn!("Rejecting too-old message on chanel {msg:?}");
             return false;
         }
+
         if self.seen_buf.exists(msg.id().0) {
             // warn!("Rejecting already seen message on channel {msg:?}");
             return false;

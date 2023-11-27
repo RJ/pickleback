@@ -8,7 +8,7 @@ use packeteer::prelude::*;
 use packeteer::testing::*;
 
 /// How many messages to send during soak tests:
-const NUM_TEST_MSGS: usize = 1000;
+const NUM_TEST_MSGS: usize = 10000;
 /// If doing reliable sending over lossy pipe, how many extra ticks to mop up straggling acks:
 const NUM_EXTRA_ITERATIONS: usize = 100;
 /// Random payload size is selected to generate up to this many fragments:
@@ -87,7 +87,7 @@ fn soak_message_transmission() {
 fn soak_reliable_message_transmission_with_terrible_network() {
     init_logger();
     let channel = 1;
-    let mut harness = TestHarness::new(JitterPipeConfig::terrible());
+    let mut harness = TestHarness::new(JitterPipeConfig::very_very_bad());
 
     let mut test_msgs = Vec::new();
     (0..NUM_TEST_MSGS).for_each(|_| test_msgs.push(random_payload_max_frags(MAX_FRAGMENTS)));
@@ -115,8 +115,7 @@ fn soak_reliable_message_transmission_with_terrible_network() {
             i += 1;
         }
 
-        let stats = harness.advance(0.051);
-        info!("{stats:?}");
+        harness.advance(0.051);
 
         let acked_ids = harness.collect_server_acks(channel);
         if !acked_ids.is_empty() {
@@ -135,10 +134,27 @@ fn soak_reliable_message_transmission_with_terrible_network() {
     // with enough extra iterations, resends should have ensured everything was received.
     assert_eq!(client_received_messages.len(), test_msgs.len());
 
+    // Testing the test harness here for good measure.
+    //
+    // Make sure observed loss/dupe/jittered roughly match values configured in JitterPipe
+    let server_sp = harness.server.stats().packets_sent;
+    let client_rp = harness.client.stats().packets_received;
+    let observed_packet_loss = (server_sp - client_rp) as f32 / server_sp as f32;
+    let configured_packet_loss = harness.server_jitter_pipe.config_mut().drop_chance;
+    println!("Observed packet loss: {observed_packet_loss} configured: {configured_packet_loss}");
+    // ensure packetloss within 10% of configured value during test
+    assert_float_relative_eq!(observed_packet_loss, configured_packet_loss, 0.1);
+
+    let observed_dupe = harness.client.stats().packets_duplicate as f32 / server_sp as f32;
+    let configured_dupe = harness.server_jitter_pipe.config_mut().duplicate_chance;
+    println!("Observed duplicate rate: {observed_dupe} configured: {configured_dupe}");
+    assert_float_relative_eq!(observed_dupe, configured_dupe, 0.5);
+
     println!("Server Stats: {:?}", harness.server.stats());
     println!("Server Packet loss: {}", harness.server.packet_loss());
     println!("Server RTT: {}", harness.server.rtt());
     println!("Client Stats: {:?}", harness.client.stats());
     println!("Client Packet loss: {}", harness.client.packet_loss());
     println!("Client RTT: {}", harness.client.rtt());
+    println!("Test harness transmission stats: {:?}", harness.stats);
 }
