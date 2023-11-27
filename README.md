@@ -111,7 +111,6 @@ Remember, as the number of fragments increases, the effects of packet loss are a
 10 fragments at 1% packet loss = 1 - (0.99^10) = 9.6% chance of losing a fragment.
 
 
-
 ### Provenance
 * [Gaffer articles](https://gafferongames.com/post/reliable_ordered_messages/) (building network protocol, packet acking, sequence buffer, etc)
 * [netcode.io rust code](https://github.com/jaynus/netcode.io/tree/master) (implementation of gaffer concepts)

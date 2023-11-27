@@ -3,7 +3,10 @@ name = "packeteer"
 authors = ["RJ <rj@metabrew.com>"]
 version = "0.1.0"
 edition = "2021"
-description = "A transport layer atop unreliable datagram exchange"
+description = "A reliability layer for unreliable datagram exchange"
+repository = "https://github.com/RJ/packeteer"
+license = "MIT OR Apache-2.0"
+keywords = ["netcode", "udp", "gamedev", "networking"]
 
 [dependencies]
 log = "0.4.20"
