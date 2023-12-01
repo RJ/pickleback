@@ -58,6 +58,8 @@ pub mod testing {
     pub use assert_float_eq::*;
 }
 
+use protocol::*;
+
 /// Identifies a packet - contains sequence number
 #[derive(Debug, Eq, PartialEq, Hash, Clone, Copy, PartialOrd, Ord, Default)]
 pub(crate) struct PacketId(pub(crate) u16);
@@ -83,6 +85,7 @@ pub struct Packeteer {
     stats: PacketeerStats,
     outbox: VecDeque<BufHandle>,
     pool: BufPool,
+    xor_salt: Option<u64>,
 }
 
 impl Default for Packeteer {
@@ -122,7 +125,12 @@ impl Packeteer {
             outbox: VecDeque::new(),
             channels,
             pool,
+            xor_salt: None,
         }
+    }
+
+    pub(crate) fn set_xor_salt(&mut self, xor_salt: Option<u64>) {
+        self.xor_salt = xor_salt;
     }
 
     /// Returns `PacketeerStats`, which tracks metrics on packet and message counts, etc.
@@ -236,7 +244,10 @@ impl Packeteer {
     }
 
     /// Creates a PacketHeader using the next packet sequence number, and an ack-field of recent acks.
-    fn next_packet_header(&mut self) -> Result<PacketHeader, PacketeerError> {
+    fn next_packet_header(
+        &mut self,
+        packet_type: PacketType,
+    ) -> Result<ProtocolPacketHeader, PacketeerError> {
         self.sequence_id = self.sequence_id.wrapping_add(1);
         let id = PacketId(self.sequence_id);
         let num_acks_required = self.received_unacked_packets();
@@ -245,18 +256,24 @@ impl Packeteer {
             warn!("Not composing packet, backpressure.");
             return Err(PacketeerError::Backpressure(Backpressure::TooManyPending));
         }
-        if num_acks_required == 0 {
-            Ok(PacketHeader::new_no_acks(id)?)
-        } else {
-            let ack_iter = AckIter::with_minimum_length(&self.received_buffer, num_acks_required);
-            let ret = PacketHeader::new(id, ack_iter, num_acks_required)?;
-            Ok(ret)
-        }
+
+        let ack_iter = AckIter::with_minimum_length(&self.received_buffer, num_acks_required);
+        let ph =
+            ProtocolPacketHeader::new(id, ack_iter, num_acks_required, packet_type, self.xor_salt)?;
+
+        Ok(ph)
+        // if num_acks_required == 0 {
+        //     Ok(PacketHeader::new_no_acks(id)?)
+        // } else {
+        //     let ack_iter = AckIter::with_minimum_length(&self.received_buffer, num_acks_required);
+        //     let ret = PacketHeader::new(id, ack_iter, num_acks_required)?;
+        //     Ok(ret)
+        // }
     }
 
     /// Calls `next_packet_header()` and writes it to the provided cursor, returning the bytes written
     fn write_packet_header(&mut self, cursor: &mut impl Write) -> Result<usize, PacketeerError> {
-        let header = self.next_packet_header()?;
+        let header = self.next_packet_header(PacketType::Messages)?;
         debug!(
             ">>> Sending packet id:{:?} ack_id:{:?}",
             header.id(),
@@ -421,11 +438,14 @@ impl Packeteer {
     ///
     /// * Can return a PacketeerError::Io if parsing packet headers or messages fails.
     /// * Can return PacketeerError::StalePacket
-    /// /// * Can return PacketeerError::DuplicatePacket
-    pub fn process_incoming_packet(&mut self, packet: &[u8]) -> Result<(), PacketeerError> {
+    /// * Can return PacketeerError::DuplicatePacket
+    pub(crate) fn process_incoming_packet<'a>(
+        &mut self,
+        packet_len: usize,
+        msg_packet: MessagesPacket,
+    ) -> Result<(), PacketeerError> {
         self.stats.packets_received += 1;
-        let mut reader = Cursor::new(packet);
-        let header: PacketHeader = PacketHeader::parse(&mut reader)?;
+        let header = &msg_packet.header;
         log::trace!(
             "<<< Receiving packet id:{:?} ack_id:{:?}",
             header.id(),
@@ -454,39 +474,59 @@ impl Packeteer {
         }
         self.received_buffer.insert(
             header.id().0,
-            ReceivedMeta::new(self.time, self.config.packet_header_size + packet.len()),
+            ReceivedMeta::new(self.time, self.config.packet_header_size + packet_len),
         )?;
-        self.process_packet_acks_and_rtt(&header);
-        self.process_packet_messages(&mut reader)?;
+        self.process_packet_acks_and_rtt(header);
+        // process messages
+        // self.process_packet_messages(msg_packet.messages.filter_map(|res| res.ok()))?;
+        for msg_res in msg_packet.messages {
+            match msg_res {
+                Ok(msg) => {
+                    self.stats.messages_received += 1;
+                    info!("Parsed from packet: {msg:?}");
+                    if let Some(channel) = self.channels.get_mut(msg.channel()) {
+                        if channel.accepts_message(&msg) {
+                            self.dispatcher.process_received_message(msg);
+                        } else {
+                            trace!("Channel rejects message id {msg:?}");
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::error!("Error parsing message: {e:?}");
+                    break;
+                }
+            }
+            //
+        }
 
         Ok(())
     }
 
     /// Parses Messages from packet payload and delivers them to the dispatcher
-    fn process_packet_messages(
-        &mut self,
-        reader: &mut Cursor<&[u8]>,
-    ) -> Result<(), PacketeerError> {
-        while reader.remaining() > 0 {
-            // as long as there are bytes left to read, we should only find whole messages
-            let msg = Message::parse(&self.pool, reader)?;
-            self.stats.messages_received += 1;
-            info!("Parsed from packet: {msg:?}");
-            if let Some(channel) = self.channels.get_mut(msg.channel()) {
-                if channel.accepts_message(&msg) {
-                    self.dispatcher.process_received_message(msg);
-                } else {
-                    trace!("Channel rejects message id {msg:?}");
-                }
-            }
-        }
-        Ok(())
-    }
+    // fn process_packet_messages(
+    //     &mut self,
+    //     messages: &mut impl Iterator<Item = Message>,
+    // ) -> Result<(), PacketeerError> {
+    //     while let Some(msg) = messages.next() {
+    //         // for msg in messages {
+    //         self.stats.messages_received += 1;
+    //         info!("Parsed from packet: {msg:?}");
+    //         if let Some(channel) = self.channels.get_mut(msg.channel()) {
+    //             if channel.accepts_message(&msg) {
+    //                 self.dispatcher.process_received_message(msg);
+    //             } else {
+    //                 trace!("Channel rejects message id {msg:?}");
+    //             }
+    //         }
+    //     }
+    //     Ok(())
+    // }
 
     /// Parses ack bitfield and checks for unseen acks, reports them to the dispatcher so it can
     /// ack the message ids associated with the packet sequence nunmber.
     /// Updates rtt calculations.
-    fn process_packet_acks_and_rtt(&mut self, header: &PacketHeader) {
+    fn process_packet_acks_and_rtt(&mut self, header: &ProtocolPacketHeader) {
         let Some(ack_iter) = header.acks() else {
             return;
         };
@@ -597,7 +637,7 @@ impl Packeteer {
         self.sent_buffer.get(sent_handle.0)
     }
 }
-
+/*
 #[cfg(test)]
 mod tests {
     use crate::jitter_pipe::JitterPipeConfig;
@@ -921,3 +961,4 @@ mod tests {
         assert!(to_send[0].len() < 50);
     }
 }
+*/

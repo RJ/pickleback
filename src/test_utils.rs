@@ -42,6 +42,7 @@ pub struct TestHarness {
     pub client_jitter_pipe: JitterPipe<BufHandle>,
     server_drop_indices: Option<Vec<u32>>,
     pub stats: TransmissionStats,
+    pool: BufPool,
 }
 impl TestHarness {
     pub fn new(config: JitterPipeConfig) -> Self {
@@ -56,6 +57,7 @@ impl TestHarness {
             client_jitter_pipe,
             server_drop_indices: None,
             stats: TransmissionStats::default(),
+            pool: BufPool::default(),
         }
     }
     pub fn collect_client_acks(&mut self, channel: u8) -> Vec<MessageId> {
@@ -112,7 +114,14 @@ impl TestHarness {
         let mut client_received = 0;
         while let Some(p) = self.server_jitter_pipe.take_next() {
             client_received += 1;
-            self.client.process_incoming_packet(p.as_ref());
+            let packet_len = p.len();
+            let mut reader = Cursor::new(p.as_slice());
+            match read_packet(&mut reader, &self.pool).unwrap() {
+                ProtocolPacket::Messages(mut m) => {
+                    self.client.process_incoming_packet(packet_len, m);
+                }
+                _ => panic!("Invalid proto msg"),
+            };
         }
 
         info!("🟠 client -> compose and send packets");
@@ -125,7 +134,14 @@ impl TestHarness {
         let mut server_received = 0;
         while let Some(p) = self.client_jitter_pipe.take_next() {
             server_received += 1;
-            self.server.process_incoming_packet(p.as_ref());
+            let packet_len = p.len();
+            let mut reader = Cursor::new(p.as_slice());
+            match read_packet(&mut reader, &self.pool).unwrap() {
+                ProtocolPacket::Messages(mut m) => {
+                    self.server.process_incoming_packet(packet_len, m);
+                }
+                _ => panic!("Invalid proto msg"),
+            };
         }
 
         self.stats.server_received += server_received;
