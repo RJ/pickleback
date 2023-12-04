@@ -2,6 +2,7 @@ use crate::{
     ack_header::AckHeader,
     buffer_pool::{BufHandle, BufPool},
     cursor::{BufferLimitedWriter, CursorExtras},
+    prelude::PicklebackConfig,
     PacketId, PicklebackError,
 };
 use byteorder::*;
@@ -232,16 +233,17 @@ pub(crate) struct KeepAlivePacket {
     pub(crate) client_index: u32,
 }
 
-fn write_zero_bytes<W: Write>(writer: &mut W, num_bytes: usize) -> std::io::Result<()> {
+pub(crate) fn write_zero_bytes<W: Write>(writer: &mut W, num_bytes: usize) -> std::io::Result<()> {
     let buffer = vec![0u8; num_bytes];
     writer.write_all(&buffer)
 }
 
 pub(crate) fn write_packet(
     pool: &BufPool,
+    config: &PicklebackConfig,
     packet: ProtocolPacket,
 ) -> Result<BufHandle, PicklebackError> {
-    let max_packet_size = 1180; // TODO config here
+    let max_packet_size = config.max_packet_size;
     let mut buffer = pool.get_buffer(max_packet_size);
     let mut writer = BufferLimitedWriter::new(Cursor::new(&mut buffer), max_packet_size);
 

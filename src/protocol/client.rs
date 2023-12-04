@@ -1,6 +1,6 @@
 use std::{io::Cursor, net::SocketAddr};
 
-use crate::{buffer_pool::BufPool, prelude::PicklebackError, Pickleback};
+use crate::{buffer_pool::BufHandle, prelude::PicklebackError, Pickleback};
 
 use super::*;
 
@@ -21,27 +21,20 @@ pub enum DisconnectReason {
     ServerDenied(u8),
 }
 
-// TODO need to move lib to being an endpoint that doesn't decode the messages body.. just headers seq and tracking?
-// then the top level thing contains the protocol stuff plus the endpoint, plus the msg decoding thing
-
-/// This can get wrapped up in a bevy plugin with a transport, and packets can be shuttled
-/// to and fro with the transport in the plugin.
-pub struct ProtocolClient {
+pub struct PicklebackClient {
     pub(crate) time: f64,
     state: ClientState,
     client_salt: Option<u64>,
     server_salt: Option<u64>,
     xor_salt: Option<u64>,
     proto_last_send: f64,
-    out_buffer: Vec<AddressedPacket>,
     last_receive_time: f64,
     last_send_time: f64,
     pub(crate) pickleback: Pickleback,
     server_addr: SocketAddr,
-    pool: BufPool,
 }
 
-impl ProtocolClient {
+impl PicklebackClient {
     pub fn new(time: f64) -> Self {
         Self {
             time,
@@ -52,10 +45,8 @@ impl ProtocolClient {
             proto_last_send: 0.0,
             last_receive_time: 0.0,
             last_send_time: 0.0,
-            out_buffer: Vec::new(),
             pickleback: Pickleback::default(),
             server_addr: "127.0.0.1:6000".parse().expect("Invalid server address"),
-            pool: BufPool::default(),
         }
     }
 
@@ -72,8 +63,21 @@ impl ProtocolClient {
         log::info!("Client transition {:?} --> {new_state:?}", self.state);
         self.state = new_state;
         self.proto_last_send = 0.0;
-
         self.pickleback.set_xor_salt(self.xor_salt);
+        if matches!(self.state, ClientState::Disconnected(_)) {
+            self.reset();
+        }
+    }
+
+    fn reset(&mut self) {
+        log::info!("Reseting ProtocolClient");
+        self.client_salt = None;
+        self.server_salt = None;
+        self.xor_salt = None;
+        self.proto_last_send = 0.0;
+        self.last_receive_time = 0.0;
+        self.last_send_time = 0.0;
+        self.pickleback = Pickleback::default();
     }
 
     /// Cleanly disconnect from the server. This may add packets to the out_buffer for you
@@ -83,13 +87,11 @@ impl ProtocolClient {
             ClientState::Connected | ClientState::SendingChallengeResponse => {
                 // when disconnecting, we discard anything waiting to be sent,
                 // because we'll be writing a load of disconnect packets in there.
-                self.out_buffer.clear();
                 self.state_transition(ClientState::SelfInitiatedDisconnect);
             }
             _ => {
                 // disconnecting in this state doesn't require sending packets, so we just
                 // transition directly to Disconnected.
-                self.out_buffer.clear();
                 self.state_transition(ClientState::Disconnected(DisconnectReason::Normal));
             }
         }
@@ -109,20 +111,19 @@ impl ProtocolClient {
     /// Serializes the ProtocolPacket, wraps in AddressedPacket with the server_addr, and appends
     /// to self.out_buffer for sending.
     pub(crate) fn send(&mut self, packet: ProtocolPacket) -> Result<(), PicklebackError> {
-        let ap = AddressedPacket {
-            address: self.server_addr,
-            packet: write_packet(&self.pool, packet)?,
-        };
-        self.out_buffer.push(ap);
+        self.pickleback.send_packet(packet)?;
         self.last_send_time = self.time;
         Ok(())
     }
 
+    /// Calls send_fn with every packet ready to send.
+    ///
     /// In case we aren't fully connected, this could be resending challenge responses etc.
     /// If we are connected, it delegates to pickleback for messages packets.
-    pub fn drain_packets_to_send(
+    pub fn visit_packets_to_send(
         &mut self,
-    ) -> Result<std::vec::Drain<'_, AddressedPacket>, PicklebackError> {
+        mut send_fn: impl FnMut(SocketAddr, BufHandle),
+    ) -> Result<(), PicklebackError> {
         match self.state {
             ClientState::SelfInitiatedDisconnect if self.xor_salt.is_some() => {
                 for _ in 0..10 {
@@ -133,10 +134,7 @@ impl ProtocolClient {
                     self.send(d)?;
                 }
                 log::info!("Reseting Protocol Client state after disconnect");
-                // TODO reset more, like pickleback
-                self.client_salt = None;
-                self.server_salt = None;
-                self.xor_salt = None;
+                self.state_transition(ClientState::Disconnected(DisconnectReason::Normal));
             }
 
             ClientState::SendingConnectionRequest if self.proto_last_send < self.time - 0.1 => {
@@ -167,18 +165,17 @@ impl ProtocolClient {
             }
 
             ClientState::Connected => {
-                // TODO this would be better bypassing out_buffer
-                self.out_buffer
-                    .extend(
-                        self.pickleback
-                            .drain_packets_to_send()
-                            .map(|buf| AddressedPacket {
-                                address: self.server_addr,
-                                packet: buf,
-                            }),
-                    );
-                // send keepalive if nothing sent in a while
-                if self.out_buffer.is_empty() && self.time - self.last_send_time >= 0.1 {
+                // should happen in update?
+                let backpressure = match self.pickleback.compose_packets() {
+                    Ok(_) => false,
+                    Err(PicklebackError::Backpressure(_)) => true,
+                    Err(e) => return Err(e),
+                };
+                // send keepalive if nothing sent in a while (unless backpressure)
+                if !backpressure
+                    && !self.pickleback.has_packets_to_send()
+                    && self.time - self.last_send_time >= 0.1
+                {
                     log::info!("Client is sending keepalive");
                     let keepalive = ProtocolPacket::KeepAlive(KeepAlivePacket {
                         header: self.pickleback.next_packet_header(PacketType::KeepAlive)?,
@@ -193,7 +190,10 @@ impl ProtocolClient {
 
             _ => {}
         }
-        Ok(self.out_buffer.drain(..))
+        self.pickleback
+            .drain_packets_to_send()
+            .for_each(|packet| send_fn(self.server_addr, packet));
+        Ok(())
     }
 
     pub fn receive(&mut self, packet: &[u8], source: SocketAddr) -> Result<(), PicklebackError> {
@@ -205,24 +205,25 @@ impl ProtocolClient {
             log::info!("client got >>> {packet:?}");
             match packet {
                 ProtocolPacket::ConnectionChallenge(ConnectionChallengePacket {
-                    header: _,
+                    header,
                     client_salt,
                     server_salt,
                 }) if self.state == ClientState::SendingConnectionRequest => {
                     if let Some(self_client_salt) = self.client_salt {
                         if self_client_salt != client_salt {
-                            log::warn!("client salt mismatch: {packet:?}");
+                            log::warn!("client salt mismatch");
                             return Err(PicklebackError::InvalidPacket); // TODO error
                         }
                         self.server_salt = Some(server_salt);
                         let client_salt_xor_server_salt = server_salt ^ self_client_salt;
                         self.xor_salt = Some(client_salt_xor_server_salt);
+                        self.pickleback.process_incoming_packet(&header, &mut cur)?;
                         Some(ClientState::SendingChallengeResponse)
                     } else {
                         None
                     }
                 }
-                ProtocolPacket::ConnectionDenied(ConnectionDeniedPacket { header: _, reason }) => {
+                ProtocolPacket::ConnectionDenied(ConnectionDeniedPacket { header, reason }) => {
                     if self.state == ClientState::SendingConnectionRequest
                         || self.state == ClientState::SendingChallengeResponse
                     {
@@ -247,7 +248,7 @@ impl ProtocolClient {
                 {
                     if self.xor_salt == Some(xor_salt) {
                         self.last_receive_time = self.time;
-                        self.pickleback.process_packet_acks_and_rtt(&header);
+                        self.pickleback.process_incoming_packet(&header, &mut cur)?;
                         if self.state == ClientState::SendingChallengeResponse {
                             Some(ClientState::Connected)
                         } else {
@@ -261,7 +262,7 @@ impl ProtocolClient {
                     if self.xor_salt == Some(mp.xor_salt) {
                         // this will consume the remaining cursor and parse out the messages
                         self.pickleback
-                            .process_incoming_packet_payload(&mp.header, &mut cur)?;
+                            .process_incoming_packet(&mp.header, &mut cur)?;
                     }
                     None
                 }

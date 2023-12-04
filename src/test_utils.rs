@@ -4,6 +4,8 @@
 //! via JitterPipe for configurable packet loss etc.
 //!
 //! Used in integration tests and benchmarks.
+use std::net::SocketAddr;
+
 use crate::*;
 
 pub fn init_logger() {
@@ -123,9 +125,9 @@ impl MessageTestHarness {
             let packet_len = p.len();
             let mut reader = Cursor::new(p.as_slice());
             match read_packet(&mut reader).unwrap() {
-                ProtocolPacket::Messages(mut m) => self
-                    .client
-                    .process_incoming_packet_payload(&m.header, &mut reader),
+                ProtocolPacket::Messages(mut m) => {
+                    self.client.process_incoming_packet(&m.header, &mut reader)
+                }
                 _ => panic!("Invalid proto msg"),
             };
         }
@@ -143,9 +145,9 @@ impl MessageTestHarness {
             let packet_len = p.len();
             let mut reader = Cursor::new(p.as_slice());
             match read_packet(&mut reader).unwrap() {
-                ProtocolPacket::Messages(mut m) => self
-                    .server
-                    .process_incoming_packet_payload(&m.header, &mut reader),
+                ProtocolPacket::Messages(mut m) => {
+                    self.server.process_incoming_packet(&m.header, &mut reader)
+                }
                 _ => panic!("Invalid proto msg"),
             };
         }
@@ -161,8 +163,8 @@ impl MessageTestHarness {
 
 /// A test harness that creates two Pickleback endpoints, and "connects" them via JitterPipes
 pub struct ProtocolTestHarness {
-    pub server: ProtocolServer,
-    pub client: ProtocolClient,
+    pub server: PicklebackServer,
+    pub client: PicklebackClient,
     pub server_jitter_pipe: JitterPipe<AddressedPacket>,
     pub client_jitter_pipe: JitterPipe<AddressedPacket>,
     server_drop_indices: Option<Vec<u32>>,
@@ -174,8 +176,8 @@ impl ProtocolTestHarness {
         let server_jitter_pipe = JitterPipe::new(config.clone());
         let client_jitter_pipe = JitterPipe::new(config);
         let time = 0.0;
-        let server = ProtocolServer::new(time);
-        let client = ProtocolClient::new(time);
+        let server = PicklebackServer::new(time);
+        let client = PicklebackClient::new(time);
         Self {
             server,
             client,
@@ -234,16 +236,15 @@ impl ProtocolTestHarness {
         let server_drop_indices = self.server_drop_indices.as_ref().unwrap_or(&empty);
 
         trace!("🟡 server -> compose and send packets");
-        let server_sent = self
-            .server
-            .drain_packets_to_send()
-            .fold(0_u32, |acc, packet| {
-                if !server_drop_indices.contains(&acc) {
-                    self.server_jitter_pipe.insert(packet);
+        let mut server_sent = 0;
+        self.server
+            .visit_packets_to_send(|address: SocketAddr, packet: BufHandle| {
+                if !server_drop_indices.contains(&server_sent) {
+                    self.server_jitter_pipe
+                        .insert(AddressedPacket { address, packet });
                 }
-                acc + 1
+                server_sent += 1;
             });
-
         trace!("🟠 client -> process incoming packets");
         let mut client_received = 0;
         while let Some(p) = self.server_jitter_pipe.take_next() {
@@ -252,13 +253,13 @@ impl ProtocolTestHarness {
         }
 
         trace!("🟠 client -> compose and send packets");
-        let client_sent = self
-            .client
-            .drain_packets_to_send()
-            .unwrap()
-            .fold(0, |acc, packet| {
-                self.client_jitter_pipe.insert(packet);
-                acc + 1
+        let client_sent = 0;
+        self.client
+            .visit_packets_to_send(|address: SocketAddr, packet: BufHandle| {
+                self.client_jitter_pipe
+                    .insert(AddressedPacket { address, packet });
+
+                server_sent += 1;
             });
 
         trace!("🟡 server -> process incoming packets");

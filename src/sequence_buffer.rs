@@ -31,6 +31,15 @@ where
         }
     }
 
+    pub fn reset(&mut self) {
+        let size = self.entries.capacity();
+        self.entries.clear();
+        self.entry_sequences.clear();
+        self.entries.resize(size, T::default());
+        self.entry_sequences.resize(size, 0xFFFF_FFFF);
+        self.sequence = 0;
+    }
+
     #[allow(unused)]
     fn type_name(&self) -> &str {
         std::any::type_name::<T>()

@@ -1,10 +1,15 @@
 use super::*;
 use crate::{
-    buffer_pool::BufPool,
+    buffer_pool::{BufHandle, BufPool},
     prelude::{PicklebackConfig, PicklebackError},
     PacketId, Pickleback,
 };
-use std::{collections::VecDeque, io::Cursor, iter::empty, net::SocketAddr};
+use std::{
+    collections::VecDeque,
+    io::Cursor,
+    iter::{self, empty},
+    net::SocketAddr,
+};
 
 // when server gets a ConnectionRequest, it sends a Connection Challenge Packet and creates
 // a PendingClient.
@@ -53,22 +58,20 @@ impl std::fmt::Debug for ConnectedClient {
 }
 
 // this should hold the pickleback instance?
-pub struct ProtocolServer {
+pub struct PicklebackServer {
     pub(crate) time: f64,
     pending_clients: Vec<PendingClient>,
     connected_clients: Vec<ConnectedClient>,
-    outbox: VecDeque<AddressedPacket>,
-    pool: BufPool,
+    // outbox: VecDeque<AddressedPacket>,
 }
 
-impl ProtocolServer {
+impl PicklebackServer {
     pub(crate) fn new(time: f64) -> Self {
         Self {
             time,
             pending_clients: Vec::new(),
             connected_clients: Vec::new(),
-            outbox: VecDeque::new(),
-            pool: BufPool::default(),
+            // outbox: VecDeque::new(),
         }
     }
     pub fn update(&mut self, dt: f64) -> Result<(), PicklebackError> {
@@ -77,20 +80,28 @@ impl ProtocolServer {
         Ok(())
     }
 
-    pub fn drain_packets_to_send(
-        &mut self,
-    ) -> std::collections::vec_deque::Drain<'_, AddressedPacket> {
-        self.outbox.drain(..)
+    /// Send all pending outbound packets for all clients
+    pub fn visit_packets_to_send(&mut self, mut send_fn: impl FnMut(SocketAddr, BufHandle)) {
+        for pc in &mut self.pending_clients {
+            pc.pickleback
+                .drain_packets_to_send()
+                .for_each(|packet| send_fn(pc.socket_addr, packet));
+        }
+        for cc in &mut self.connected_clients {
+            cc.pickleback
+                .drain_packets_to_send()
+                .for_each(|packet| send_fn(cc.socket_addr, packet));
+        }
     }
 
     fn compose_packets(&mut self) -> Result<(), PicklebackError> {
         let mut to_remove = Vec::new();
 
         // Run state-machine for pending clients:
-        // TODO need to time out and clean up quite pending clients
+        // TODO need to time out and clean up quiet pending clients
         for i in 0..self.pending_clients.len() {
             let pc = &mut self.pending_clients[i];
-            if self.time - pc.first_requested_time > 5000. {
+            if self.time - pc.first_requested_time > 5. {
                 to_remove.push(i);
                 continue;
             }
@@ -103,12 +114,7 @@ impl ProtocolServer {
                     client_salt: pc.client_salt,
                     server_salt: pc.server_salt,
                 });
-
-                let packet = write_packet(&self.pool, packet)?;
-                self.outbox.push_back(AddressedPacket {
-                    address: pc.socket_addr,
-                    packet,
-                });
+                pc.pickleback.send_packet(packet)?;
             }
         }
         for i in to_remove.drain(..) {
@@ -129,7 +135,7 @@ impl ProtocolServer {
         }
         // for connected clients, we send any messages that the pickleback layer wants
         for cc in self.connected_clients.iter_mut() {
-            let pre_len = self.outbox.len();
+            // let pre_len = self.outbox.len();
             // * until confirmed, send a KA before messages packets
             // * if nothing sent for a while, send a KA
             if !cc.confirmed || self.time - cc.last_sent_time > 0.1 {
@@ -138,35 +144,32 @@ impl ProtocolServer {
                     xor_salt: cc.xor_salt,
                     client_index: cc.client_index.unwrap_or_default(), // TODO
                 });
-                self.outbox.push_back(AddressedPacket {
-                    address: cc.socket_addr,
-                    packet: write_packet(&self.pool, keepalive)?,
-                });
+                cc.pickleback.send_packet(keepalive)?;
             }
-            self.outbox
-                .extend(
-                    cc.pickleback
-                        .drain_packets_to_send()
-                        .map(|packet| AddressedPacket {
-                            address: cc.socket_addr,
-                            packet,
-                        }),
-                );
-            if self.outbox.len() != pre_len {
-                cc.last_sent_time = self.time;
-                // } else if cc.pickleback.received_unacked_packets() > 0 {
-                //     // still have acks to deliver? send a ka packet just for acks.
-                //     let keepalive = ProtocolPacket::KeepAlive(KeepAlivePacket {
-                //         header: cc.pickleback.next_packet_header(PacketType::KeepAlive)?,
-                //         xor_salt: cc.xor_salt,
-                //         client_index: cc.client_index.unwrap_or_default(), // TODO
-                //     });
-                //     self.outbox.push_back(AddressedPacket {
-                //         address: cc.socket_addr,
-                //         packet: write_packet(&self.pool, keepalive)?,
-                //     });
-                //     cc.last_sent_time = self.time;
-            }
+            // self.outbox
+            //     .extend(
+            //         cc.pickleback
+            //             .drain_packets_to_send()
+            //             .map(|packet| AddressedPacket {
+            //                 address: cc.socket_addr,
+            //                 packet,
+            //             }),
+            //     );
+            // if self.outbox.len() != pre_len {
+            //     cc.last_sent_time = self.time;
+            // } else if cc.pickleback.received_unacked_packets() > 0 {
+            //     // still have acks to deliver? send a ka packet just for acks.
+            //     let keepalive = ProtocolPacket::KeepAlive(KeepAlivePacket {
+            //         header: cc.pickleback.next_packet_header(PacketType::KeepAlive)?,
+            //         xor_salt: cc.xor_salt,
+            //         client_index: cc.client_index.unwrap_or_default(), // TODO
+            //     });
+            //     self.outbox.push_back(AddressedPacket {
+            //         address: cc.socket_addr,
+            //         packet: write_packet(&self.pool, keepalive)?,
+            //     });
+            //     cc.last_sent_time = self.time;
+            // }
         }
         Ok(())
     }
@@ -243,22 +246,23 @@ impl ProtocolServer {
             }) => {
                 if protocol_version != PROTOCOL_VERSION {
                     log::warn!("Protocol version mismatch");
-                    let denied = write_packet(
-                        &self.pool,
-                        ProtocolPacket::ConnectionDenied(ConnectionDeniedPacket {
-                            header: ProtocolPacketHeader::new(
-                                PacketId(0),
-                                empty(),
-                                0,
-                                PacketType::ConnectionDenied,
-                            )?,
-                            reason: 0, // TODO
-                        }),
-                    )?;
-                    self.outbox.push_back(AddressedPacket {
-                        address: client_addr,
-                        packet: denied,
-                    });
+                    // TODO:
+                    // let denied = write_packet(
+                    //     &self.pool,
+                    //     ProtocolPacket::ConnectionDenied(ConnectionDeniedPacket {
+                    //         header: ProtocolPacketHeader::new(
+                    //             PacketId(0),
+                    //             empty(),
+                    //             0,
+                    //             PacketType::ConnectionDenied,
+                    //         )?,
+                    //         reason: 0, // TODO
+                    //     }),
+                    // )?;
+                    // self.outbox.push_back(AddressedPacket {
+                    //     address: client_addr,
+                    //     packet: denied,
+                    // });
                     return Ok(());
                 }
                 if let Some(_pending) = self.get_pending_by_client_salt(client_salt, client_addr) {
@@ -298,29 +302,27 @@ impl ProtocolServer {
                         xor_salt: cc.xor_salt,
                         client_index: 0,
                     });
-                    self.outbox.push_back(AddressedPacket {
-                        address: cc.socket_addr,
-                        packet: write_packet(&self.pool, ka)?,
-                    });
+                    cc.pickleback.send_packet(ka)?;
                     log::info!("New CC: {client_addr:?} = {cc:?}");
                     self.connected_clients.push(cc);
                 } else {
-                    let denied = write_packet(
-                        &self.pool,
-                        ProtocolPacket::ConnectionDenied(ConnectionDeniedPacket {
-                            header: ProtocolPacketHeader::new(
-                                PacketId(0),
-                                empty(),
-                                0,
-                                PacketType::ConnectionDenied,
-                            )?,
-                            reason: 0,
-                        }),
-                    )?;
-                    self.outbox.push_back(AddressedPacket {
-                        address: client_addr,
-                        packet: denied,
-                    });
+                    // TODO:
+                    // let denied = write_packet(
+                    //     &self.pool,
+                    //     ProtocolPacket::ConnectionDenied(ConnectionDeniedPacket {
+                    //         header: ProtocolPacketHeader::new(
+                    //             PacketId(0),
+                    //             empty(),
+                    //             0,
+                    //             PacketType::ConnectionDenied,
+                    //         )?,
+                    //         reason: 0,
+                    //     }),
+                    // )?;
+                    // self.outbox.push_back(AddressedPacket {
+                    //     address: client_addr,
+                    //     packet: denied,
+                    // });
                 }
             }
 
@@ -359,7 +361,7 @@ impl ProtocolServer {
                     }
                     // this will consume the remaining cursor and parse out the messages
                     cc.pickleback
-                        .process_incoming_packet_payload(&mp.header, &mut cur)?;
+                        .process_incoming_packet(&mp.header, &mut cur)?;
                 } else {
                     log::warn!(
                         "Server Discarding messages packet, no session {client_addr} = {mp:?}"

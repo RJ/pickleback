@@ -130,6 +130,22 @@ impl Pickleback {
         }
     }
 
+    /*
+    pub(crate) fn reset(&mut self) {
+        self.rtt = 0.0;
+        self.packet_loss = 0.0;
+        self.sequence_id = 0;
+        self.newest_ack = None;
+        self.ack_low_watermark = None;
+        self.stats = PicklebackStats::default();
+        self.outbox.clear();
+        self.xor_salt = None;
+        self.sent_buffer.reset();
+        self.received_buffer.reset();
+        self.dispatcher = MessageDispatcher::new(&self.config);
+    }
+    */
+
     pub(crate) fn set_xor_salt(&mut self, xor_salt: Option<u64>) {
         self.xor_salt = xor_salt;
     }
@@ -161,7 +177,7 @@ impl Pickleback {
     /// If unable to write all packets, for whatever reason (for development..)
     ///
     pub fn drain_packets_to_send(&mut self) -> std::collections::vec_deque::Drain<'_, BufHandle> {
-        match self.write_packets_to_send() {
+        match self.compose_packets() {
             Ok(()) => self.outbox.drain(..),
             Err(PicklebackError::Backpressure(bp)) => {
                 // Might have written some packets, but not all.
@@ -260,15 +276,7 @@ impl Pickleback {
 
         let ack_iter = AckIter::with_minimum_length(&self.received_buffer, num_acks_required);
         let ph = ProtocolPacketHeader::new(id, ack_iter, num_acks_required, packet_type)?;
-
         Ok(ph)
-        // if num_acks_required == 0 {
-        //     Ok(PacketHeader::new_no_acks(id)?)
-        // } else {
-        //     let ack_iter = AckIter::with_minimum_length(&self.received_buffer, num_acks_required);
-        //     let ret = PacketHeader::new(id, ack_iter, num_acks_required)?;
-        //     Ok(ret)
-        // }
     }
 
     /// Calls `next_packet_header()` and writes it to the provided cursor, returning the bytes written
@@ -292,8 +300,9 @@ impl Pickleback {
     ///
     /// A "packet" is a buffer sized at the max_packet_size, which is approx. 1200 bytes.
     /// name: compose_packets?
-    fn write_packets_to_send(&mut self) -> Result<(), PicklebackError> {
+    fn compose_packets(&mut self) -> Result<(), PicklebackError> {
         if self.sent_unacked_packets() >= MAX_UNACKED_PACKETS {
+            log::warn!("TooManyPending - backpressure");
             return Err(PicklebackError::Backpressure(Backpressure::TooManyPending));
         }
 
@@ -338,7 +347,7 @@ impl Pickleback {
             if writer.as_ref().unwrap().remaining() != max_packet_size {
                 sent_something = true;
                 writer = None;
-                self.send_packet(packet.take().unwrap())?;
+                self.send_raw_packet(packet.take().unwrap())?;
                 self.dispatcher.set_packet_message_handles(
                     PacketId(self.sequence_id),
                     std::mem::take(&mut message_handles_in_packet),
@@ -389,16 +398,26 @@ impl Pickleback {
         let mut packet = Some(self.pool.get_buffer(1300));
         let mut cursor = Cursor::new(packet.as_mut().unwrap().as_mut());
         self.write_packet_header(&mut cursor)?;
-        self.send_packet(packet.take().unwrap())
+        self.send_raw_packet(packet.take().unwrap())
     }
 
-    /// "Send" a fully formed packet, by writing a record into the sent buffer,
+    /// Write a packet to a newly allocated buffer and send it.
+    pub(crate) fn send_packet(&mut self, packet: ProtocolPacket) -> Result<(), PicklebackError> {
+        let buf = write_packet(&self.pool, &self.config, packet)?;
+        self.send_raw_packet(buf)
+    }
+
+    // pub(crate) fn receive_packet(&mut self, packet: &[u8]) -> Result<ProtocolPacket, PicklebackError> {
+    //     let
+    // }
+
+    /// "Send" a fully written packet (headers & payload), by writing a record into the sent buffer,
     /// incrementing the stats counters, and placing the packet into the outbox
     ///
     /// The BufHandle is for a packet with headers written, usually in `write_packets_to_send()`.
     ///
     /// The consumer code should fetch and dispatch it via whatever means they like.
-    fn send_packet(&mut self, packet: BufHandle) -> Result<(), PicklebackError> {
+    fn send_raw_packet(&mut self, packet: BufHandle) -> Result<(), PicklebackError> {
         let send_size = packet.len() + self.config.packet_header_size;
         // received_buffer.sequence() is the most recent packet ack we're acknowledging reciept of in the
         // header of this packet we're about to send.
@@ -434,7 +453,9 @@ impl Pickleback {
         }
     }
 
-    /// Parse and process Messages from cursor, where the provided header has already been read.
+    /// Process acks, update metadata tracking, recalcualte RTT etc.
+    ///
+    /// For PacketType::Messages this reads the remainder of the Cursor to parse Messages.
     ///
     /// Called by consumer with a packet they just read from the network.
     /// Extracted messages are delivered to channels, acks are extracted for later consumption.
@@ -444,7 +465,7 @@ impl Pickleback {
     /// * Can return a PicklebackError::Io if parsing packet headers or messages fails.
     /// * Can return PicklebackError::StalePacket
     /// * Can return PicklebackError::DuplicatePacket
-    pub(crate) fn process_incoming_packet_payload(
+    pub(crate) fn process_incoming_packet(
         &mut self,
         header: &ProtocolPacketHeader,
         payload_reader: &mut Cursor<&[u8]>,
@@ -482,108 +503,24 @@ impl Pickleback {
             ReceivedMeta::new(self.time, self.config.packet_header_size + packet_len),
         )?;
         self.process_packet_acks_and_rtt(header);
-        // as long as there are bytes left to read, we should only find whole messages
-        while payload_reader.remaining() > 0 {
-            let msg = Message::parse(&self.pool, payload_reader)?;
-            self.stats.messages_received += 1;
-            info!("Parsed from packet: {msg:?}");
-            if let Some(channel) = self.channels.get_mut(msg.channel()) {
-                if channel.accepts_message(&msg) {
-                    self.dispatcher.process_received_message(msg);
-                } else {
-                    trace!("Channel rejects message id {msg:?}");
+        // Only the messages packet type leaves stuff in the buffer for us to process
+        if matches!(header.packet_type, PacketType::Messages) {
+            // as long as there are bytes left to read, we should only find whole messages
+            while payload_reader.remaining() > 0 {
+                let msg = Message::parse(&self.pool, payload_reader)?;
+                self.stats.messages_received += 1;
+                info!("Parsed from packet: {msg:?}");
+                if let Some(channel) = self.channels.get_mut(msg.channel()) {
+                    if channel.accepts_message(&msg) {
+                        self.dispatcher.process_received_message(msg);
+                    } else {
+                        trace!("Channel rejects message id {msg:?}");
+                    }
                 }
             }
         }
         Ok(())
     }
-
-    /// Parse a received packet, reading the header and all messages contained within.
-    ///
-    /// Called by consumer with a packet they just read from the network.
-    /// Extracted messages are delivered to channels, acks are extracted for later consumption.
-    ///
-    /// # Errors
-    ///
-    /// * Can return a PicklebackError::Io if parsing packet headers or messages fails.
-    /// * Can return PicklebackError::StalePacket
-    /// * Can return PicklebackError::DuplicatePacket
-    /*
-    pub(crate) fn process_incoming_packet(
-        &mut self,
-        packet_len: usize,
-        msg_packet: MessagesPacket,
-    ) -> Result<(), PicklebackError> {
-        self.stats.packets_received += 1;
-        let header = &msg_packet.header;
-        log::trace!(
-            "<<< Receiving packet id:{:?} ack_id:{:?}",
-            header.id(),
-            header.ack_id(),
-        );
-        // if this packet sequence is out of buffer range, reject as stale
-        if !self.received_buffer.check_sequence(header.id().0) {
-            log::debug!("Ignoring stale packet: {}", header.id().0);
-            self.stats.packets_stale += 1;
-            return Err(PicklebackError::StalePacket);
-        }
-
-        // TODO we can only reject older sequence numbers for unreliable unfragmented messages atm
-        // perhaps we need to delegate some checks to channels by passing the packetheader in?
-        if !self.received_buffer.check_newer_than_current(header.id().0) {
-            // log::debug!("Ignoring stale packet: {}", header.id().0);
-            // self.stats.packets_stale += 1;
-            // return Err(PicklebackError::StalePacket);
-        }
-
-        // if this packet was already received, reject as duplicate
-        if self.received_buffer.exists(header.id().0) {
-            log::debug!("Ignoring duplicate packet: {:?}", header.id());
-            self.stats.packets_duplicate += 1;
-            return Err(PicklebackError::DuplicatePacket);
-        }
-        self.received_buffer.insert(
-            header.id().0,
-            ReceivedMeta::new(self.time, self.config.packet_header_size + packet_len),
-        )?;
-        self.process_packet_acks_and_rtt(header);
-        // process messages
-        // self.process_packet_messages(msg_packet.messages.filter_map(|res| res.ok()))?;
-        for msg in msg_packet.messages {
-            self.stats.messages_received += 1;
-            info!("Parsed from packet: {msg:?}");
-            if let Some(channel) = self.channels.get_mut(msg.channel()) {
-                if channel.accepts_message(&msg) {
-                    self.dispatcher.process_received_message(msg);
-                } else {
-                    trace!("Channel rejects message id {msg:?}");
-                }
-            }
-        }
-
-        Ok(())
-    }
-    */
-
-    /// Parses Messages from packet payload and delivers them to the dispatcher
-    // fn process_packet_messages(
-    //     &mut self,
-    //     messages: &mut impl Iterator<Item = Message>,
-    // ) -> Result<(), PicklebackError> {
-    //     while let Some(msg) = messages.next() {
-    //         // for msg in messages {
-    //         self.stats.messages_received += 1;
-    //         info!("Parsed from packet: {msg:?}");
-    //         if let Some(channel) = self.channels.get_mut(msg.channel()) {
-    //             if channel.accepts_message(&msg) {
-    //                 self.dispatcher.process_received_message(msg);
-    //             } else {
-    //                 trace!("Channel rejects message id {msg:?}");
-    //             }
-    //         }
-    //     }
-    //     Ok(())
-    // }
 
     /// Parses ack bitfield and checks for unseen acks, reports them to the dispatcher so it can
     /// ack the message ids associated with the packet sequence nunmber.
@@ -729,9 +666,7 @@ mod tests {
         else {
             panic!("err");
         };
-        assert!(client
-            .process_incoming_packet_payload(&header, &mut cur)
-            .is_ok());
+        assert!(client.process_incoming_packet(&header, &mut cur).is_ok());
 
         let rec = client.drain_received_messages(0).next().unwrap();
         assert_eq!(rec.channel(), 0);
@@ -746,7 +681,7 @@ mod tests {
         else {
             panic!("err");
         };
-        match client.process_incoming_packet_payload(&header, &mut cur) {
+        match client.process_incoming_packet(&header, &mut cur) {
             Err(PicklebackError::DuplicatePacket) => {}
             e => {
                 panic!("Should be dupe packet error, got: {:?}", e);
@@ -779,9 +714,7 @@ mod tests {
             else {
                 panic!("err");
             };
-            client
-                .process_incoming_packet_payload(&header, &mut cur)
-                .unwrap();
+            client.process_incoming_packet(&header, &mut cur).unwrap();
         });
         info!("sent_unacked is now: {}", server.sent_unacked_packets());
         info!("Send attempt for MAX_UNACKED_PACKETS+1");
@@ -803,9 +736,7 @@ mod tests {
             else {
                 panic!("err");
             };
-            server
-                .process_incoming_packet_payload(&header, &mut cur)
-                .unwrap();
+            server.process_incoming_packet(&header, &mut cur).unwrap();
         });
 
         assert_eq!(sent_ids.len(), client.drain_received_messages(0).len());
@@ -844,9 +775,7 @@ mod tests {
                     panic!("err");
                 };
 
-                client
-                    .process_incoming_packet_payload(&header, &mut cur)
-                    .unwrap();
+                client.process_incoming_packet(&header, &mut cur).unwrap();
                 assert_eq!(
                     test_data,
                     client
@@ -865,9 +794,7 @@ mod tests {
                 else {
                     panic!("err");
                 };
-                server
-                    .process_incoming_packet_payload(&header, &mut cur)
-                    .unwrap();
+                server.process_incoming_packet(&header, &mut cur).unwrap();
                 assert_eq!(
                     test_data,
                     server
