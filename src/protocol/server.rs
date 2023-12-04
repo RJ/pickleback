@@ -137,6 +137,7 @@ impl ProtocolServer {
             if !cc.confirmed || self.time - cc.last_sent_time > 0.1 {
                 let keepalive = ProtocolPacket::KeepAlive(KeepAlivePacket {
                     header: cc.packeteer.next_packet_header(PacketType::KeepAlive)?,
+                    xor_salt: cc.xor_salt,
                     client_index: 0,
                 });
                 self.outbox.push_back(AddressedPacket {
@@ -241,7 +242,6 @@ impl ProtocolServer {
                                 empty(),
                                 0,
                                 PacketType::ConnectionDenied,
-                                None,
                             )?,
                             reason: 0, // TODO
                         }),
@@ -268,11 +268,10 @@ impl ProtocolServer {
             }
             ProtocolPacket::ConnectionChallengeResponse(ConnectionChallengeResponsePacket {
                 header,
-            }) if header.xor_salt.is_some() => {
+                xor_salt,
+            }) => {
                 // there should be a pending client when we get a challenge response
-                if let Some(pending) =
-                    self.take_pending_by_xor_salt(header.xor_salt.unwrap(), client_addr)
-                {
+                if let Some(pending) = self.take_pending_by_xor_salt(xor_salt, client_addr) {
                     let xor_salt = pending.client_salt ^ pending.server_salt;
                     let mut packeteer = pending.packeteer;
                     packeteer.xor_salt = Some(xor_salt);
@@ -290,6 +289,7 @@ impl ProtocolServer {
                     // send KA
                     let ka = ProtocolPacket::KeepAlive(KeepAlivePacket {
                         header: cc.packeteer.next_packet_header(PacketType::KeepAlive)?,
+                        xor_salt: cc.xor_salt,
                         client_index: 0,
                     });
                     self.outbox.push_back(AddressedPacket {
@@ -307,7 +307,6 @@ impl ProtocolServer {
                                 empty(),
                                 0,
                                 PacketType::ConnectionDenied,
-                                None,
                             )?,
                             reason: 0,
                         }),
@@ -319,21 +318,14 @@ impl ProtocolServer {
                 }
             }
 
-            ProtocolPacket::Disconnect(DisconnectPacket { header })
-                if header.xor_salt.is_some() =>
-            {
-                if let Some(cc) =
-                    self.remove_connected_client(header.xor_salt.unwrap(), client_addr)
-                {
+            ProtocolPacket::Disconnect(DisconnectPacket { header, xor_salt }) => {
+                if let Some(cc) = self.remove_connected_client(xor_salt, client_addr) {
                     log::info!("REMOVED CLIENT: {:?}", cc.socket_addr);
                 }
             }
             ProtocolPacket::KeepAlive(KeepAlivePacket {
-                header:
-                    ProtocolPacketHeader {
-                        xor_salt: Some(xor_salt),
-                        ..
-                    },
+                header,
+                xor_salt,
                 client_index: _, // reported by client. check it matches?
             }) => {
                 let time = self.time;
@@ -349,9 +341,7 @@ impl ProtocolServer {
             }
             ProtocolPacket::Messages(mp) => {
                 let time = self.time;
-                if let Some(cc) =
-                    self.get_connected_client_mut(mp.header.xor_salt.unwrap(), client_addr)
-                {
+                if let Some(cc) = self.get_connected_client_mut(mp.xor_salt, client_addr) {
                     cc.last_received_time = time;
                     if !cc.confirmed {
                         log::info!("Marking cc as confirmed due to messages");

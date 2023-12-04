@@ -2,6 +2,7 @@
 #![doc = include_str!("../README.md")]
 #![deny(rustdoc::broken_intra_doc_links)]
 
+use byteorder::{NetworkEndian, WriteBytesExt};
 use cursor::{BufferLimitedWriter, CursorExtras};
 use log::*;
 use std::{
@@ -258,8 +259,7 @@ impl Packeteer {
         }
 
         let ack_iter = AckIter::with_minimum_length(&self.received_buffer, num_acks_required);
-        let ph =
-            ProtocolPacketHeader::new(id, ack_iter, num_acks_required, packet_type, self.xor_salt)?;
+        let ph = ProtocolPacketHeader::new(id, ack_iter, num_acks_required, packet_type)?;
 
         Ok(ph)
         // if num_acks_required == 0 {
@@ -280,7 +280,11 @@ impl Packeteer {
             header.ack_id(),
         );
         header.write(cursor)?;
-        Ok(header.size())
+        cursor.write_u64::<NetworkEndian>(
+            self.xor_salt
+                .expect("expected xor_salt when writing packet header for messages"),
+        )?;
+        Ok(header.size() + 8)
     }
 
     /// For all the channels, coalesce any outbound messages they have into packets, with

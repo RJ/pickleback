@@ -128,6 +128,7 @@ impl ProtocolClient {
                 for _ in 0..10 {
                     let d = ProtocolPacket::Disconnect(DisconnectPacket {
                         header: self.packeteer.next_packet_header(PacketType::Disconnect)?,
+                        xor_salt: self.xor_salt.unwrap(),
                     });
                     self.send(d)?;
                 }
@@ -150,13 +151,18 @@ impl ProtocolClient {
                 }))?;
             }
 
-            ClientState::SendingChallengeResponse if self.proto_last_send < self.time - 0.1 => {
+            ClientState::SendingChallengeResponse
+                if self.proto_last_send < self.time - 0.1 && self.xor_salt.is_some() =>
+            {
                 self.proto_last_send = self.time;
                 let header = self
                     .packeteer
                     .next_packet_header(PacketType::ConnectionChallengeResponse)?;
                 self.send(ProtocolPacket::ConnectionChallengeResponse(
-                    ConnectionChallengeResponsePacket { header },
+                    ConnectionChallengeResponsePacket {
+                        header,
+                        xor_salt: self.xor_salt.unwrap(),
+                    },
                 ))?;
             }
 
@@ -177,6 +183,9 @@ impl ProtocolClient {
                     let keepalive = ProtocolPacket::KeepAlive(KeepAlivePacket {
                         header: self.packeteer.next_packet_header(PacketType::KeepAlive)?,
                         client_index: 0,
+                        xor_salt: self
+                            .xor_salt
+                            .expect("Should be an xor_salt in Connected state"),
                     });
                     self.send(keepalive)?;
                 }
@@ -230,13 +239,14 @@ impl ProtocolClient {
                 }
                 ProtocolPacket::KeepAlive(KeepAlivePacket {
                     header,
+                    xor_salt,
                     client_index: _,
                 }) if matches!(
                     self.state,
                     ClientState::Connected | ClientState::SendingChallengeResponse
                 ) =>
                 {
-                    if self.xor_salt == header.xor_salt {
+                    if self.xor_salt == Some(xor_salt) {
                         self.last_receive_time = self.time;
                         if self.state == ClientState::SendingChallengeResponse {
                             Some(ClientState::Connected)
@@ -248,7 +258,7 @@ impl ProtocolClient {
                     }
                 }
                 ProtocolPacket::Messages(mp) if self.state == ClientState::Connected => {
-                    if self.xor_salt == mp.header.xor_salt {
+                    if self.xor_salt == Some(mp.xor_salt) {
                         self.packeteer.process_incoming_packet(packet_len, mp)?;
                     }
                     None

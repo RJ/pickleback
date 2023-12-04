@@ -85,7 +85,6 @@ pub(crate) struct ProtocolPacketHeader {
     pub(crate) packet_type: PacketType,
     pub(crate) id: PacketId,
     pub(crate) ack_header: Option<AckHeader>,
-    pub(crate) xor_salt: Option<u64>,
 }
 
 impl ProtocolPacketHeader {
@@ -94,29 +93,25 @@ impl ProtocolPacketHeader {
         ack_iter: impl Iterator<Item = (u16, bool)>,
         num_acks: u16,
         packet_type: PacketType,
-        xor_salt: Option<u64>,
     ) -> Result<Self, PacketeerError> {
         if num_acks == 0 {
-            return Self::new_no_acks(id, packet_type, xor_salt);
+            return Self::new_no_acks(id, packet_type);
         }
         let ack_header = AckHeader::from_ack_iter(num_acks, ack_iter)?;
         Ok(Self {
             packet_type,
             id,
             ack_header: Some(ack_header),
-            xor_salt,
         })
     }
     pub(crate) fn new_no_acks(
         id: PacketId,
         packet_type: PacketType,
-        xor_salt: Option<u64>,
     ) -> Result<Self, PacketeerError> {
         Ok(Self {
             packet_type,
             id,
             ack_header: None,
-            xor_salt,
         })
     }
 
@@ -138,7 +133,6 @@ impl ProtocolPacketHeader {
     pub(crate) fn size(&self) -> usize {
         1 + // prefix byte
         2 + // packet sequence id
-        8 + // xor_salt
         self.ack_header.map_or(0, |header| header.size())
     }
 
@@ -150,15 +144,6 @@ impl ProtocolPacketHeader {
         }
         writer.write_u8(prefix_byte)?;
         writer.write_u16::<NetworkEndian>(self.id.0)?;
-        // packet types that have the xor_salt:
-        // 3 = ConnectionChallengeResponse
-        // 5 = Messages
-        // 6 = Disconnect
-        // 7 = KeepAlive
-        // just writing zeros if absent anyway, for convenience.
-        // only low-volume messages don't need the xor salt, so it's not really wasting bandwidth.
-        writer.write_u64::<NetworkEndian>(self.xor_salt.unwrap_or(0))?;
-
         if let Some(ack_header) = self.ack_header {
             ack_header.write(&mut writer)?;
         }
@@ -172,8 +157,6 @@ impl ProtocolPacketHeader {
             return Err(PacketeerError::InvalidPacket);
         };
         let id = PacketId(reader.read_u16::<NetworkEndian>()?);
-        let xor_salt = reader.read_u64::<NetworkEndian>()?;
-        let xor_salt = if xor_salt > 0 { Some(xor_salt) } else { None };
         let ack_header = if ack_header_present {
             Some(AckHeader::parse(reader)?)
         } else {
@@ -183,7 +166,6 @@ impl ProtocolPacketHeader {
             packet_type,
             id,
             ack_header,
-            xor_salt,
         })
     }
 }
@@ -209,6 +191,7 @@ pub(crate) struct ConnectionChallengePacket {
 #[derive(Debug)]
 pub(crate) struct ConnectionChallengeResponsePacket {
     pub(crate) header: ProtocolPacketHeader,
+    pub(crate) xor_salt: u64,
 }
 
 // S2C
@@ -221,12 +204,17 @@ pub(crate) struct ConnectionDeniedPacket {
 // Bidirectional
 pub(crate) struct MessagesPacket {
     pub(crate) header: ProtocolPacketHeader,
+    pub(crate) xor_salt: u64,
     pub(crate) messages: Vec<Message>, // Box<dyn Iterator<Item = Result<Message, PacketeerError>> + 'a>, //Vec<Message>,
 }
 
 impl std::fmt::Debug for MessagesPacket {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "MessagesPacket[header: {:?}]]", self.header)
+        write!(
+            f,
+            "MessagesPacket[header: {:?} xor_salt: {}]]",
+            self.header, self.xor_salt
+        )
     }
 }
 
@@ -234,12 +222,14 @@ impl std::fmt::Debug for MessagesPacket {
 #[derive(Debug)]
 pub(crate) struct DisconnectPacket {
     pub(crate) header: ProtocolPacketHeader,
+    pub(crate) xor_salt: u64,
 }
 
 // Bi?
 #[derive(Debug)]
 pub(crate) struct KeepAlivePacket {
     pub(crate) header: ProtocolPacketHeader,
+    pub(crate) xor_salt: u64,
     pub(crate) client_index: u32,
 }
 
@@ -259,9 +249,11 @@ pub(crate) fn write_packet(
     match packet {
         ProtocolPacket::KeepAlive(KeepAlivePacket {
             header,
+            xor_salt,
             client_index,
         }) => {
             header.write(&mut writer)?;
+            writer.write_u64::<NetworkEndian>(xor_salt)?;
             writer.write_u32::<NetworkEndian>(client_index)?;
         }
         ProtocolPacket::ConnectionRequest(ConnectionRequestPacket {
@@ -286,26 +278,23 @@ pub(crate) fn write_packet(
         }
         ProtocolPacket::ConnectionChallengeResponse(ConnectionChallengeResponsePacket {
             header,
+            xor_salt,
         }) => {
-            assert!(header.xor_salt.is_some());
             header.write(&mut writer)?;
+            writer.write_u64::<NetworkEndian>(xor_salt)?;
             write_zero_bytes(&mut writer, 500)?;
         }
         ProtocolPacket::ConnectionDenied(ConnectionDeniedPacket { header, reason }) => {
             header.write(&mut writer)?;
             writer.write_u8(reason)?;
         }
-        ProtocolPacket::Messages(MessagesPacket { .. }) => {
-            panic!("written elsewhere");
-            // assert!(header.xor_salt.is_some());
-            // header.write(&mut writer)?;
-            // while let Some(msg) = messages.next() {
-            //     writer.write_all(msg?.as_slice())?;
-            // }
-        }
-        ProtocolPacket::Disconnect(DisconnectPacket { header }) => {
-            assert!(header.xor_salt.is_some());
+        ProtocolPacket::Disconnect(DisconnectPacket { header, xor_salt }) => {
             header.write(&mut writer)?;
+            writer.write_u64::<NetworkEndian>(xor_salt)?;
+        }
+        ProtocolPacket::Messages(MessagesPacket { .. }) => {
+            // written in messages layer
+            panic!("written elsewhere");
         }
     }
     Ok(buffer)
@@ -320,6 +309,7 @@ pub(crate) fn read_packet(
         PacketType::KeepAlive => {
             let c = KeepAlivePacket {
                 header,
+                xor_salt: reader.read_u64::<NetworkEndian>()?,
                 client_index: reader.read_u32::<NetworkEndian>()?,
             };
             Ok(ProtocolPacket::KeepAlive(c))
@@ -349,7 +339,10 @@ pub(crate) fn read_packet(
             Ok(ProtocolPacket::ConnectionChallenge(c))
         }
         PacketType::ConnectionChallengeResponse => {
-            let c = ConnectionChallengeResponsePacket { header };
+            let c = ConnectionChallengeResponsePacket {
+                header,
+                xor_salt: reader.read_u64::<NetworkEndian>()?,
+            };
             if reader.remaining() != 500 {
                 log::warn!("Invalid remaining len for ConnectionChallengeResponsePacket");
                 return Err(PacketeerError::InvalidPacket);
@@ -364,16 +357,24 @@ pub(crate) fn read_packet(
             Ok(ProtocolPacket::ConnectionDenied(c))
         }
         PacketType::Messages => {
+            let xor_salt = reader.read_u64::<NetworkEndian>()?;
             let mut messages = Vec::new();
             while reader.remaining() > 0 {
                 // as long as there are bytes left to read, we should only find whole messages
                 messages.push(Message::parse(pool, reader)?);
             }
-            let c = MessagesPacket { header, messages };
+            let c = MessagesPacket {
+                header,
+                xor_salt,
+                messages,
+            };
             Ok(ProtocolPacket::Messages(c))
         }
         PacketType::Disconnect => {
-            let c = DisconnectPacket { header };
+            let c = DisconnectPacket {
+                header,
+                xor_salt: reader.read_u64::<NetworkEndian>()?,
+            };
             Ok(ProtocolPacket::Disconnect(c))
         }
     }
