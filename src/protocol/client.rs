@@ -198,10 +198,9 @@ impl ProtocolClient {
 
     pub fn receive(&mut self, packet: &[u8], source: SocketAddr) -> Result<(), PacketeerError> {
         assert_eq!(source, self.server_addr, "source and server addr mismatch"); // TODO
-        let packet_len = packet.len();
         let mut cur = Cursor::new(packet);
         let new_state = {
-            let packet = read_packet(&mut cur, &self.pool)?;
+            let packet = read_packet(&mut cur)?;
             self.last_receive_time = self.time;
             log::info!("client got >>> {packet:?}");
             match packet {
@@ -248,6 +247,7 @@ impl ProtocolClient {
                 {
                     if self.xor_salt == Some(xor_salt) {
                         self.last_receive_time = self.time;
+                        self.packeteer.process_packet_acks_and_rtt(&header);
                         if self.state == ClientState::SendingChallengeResponse {
                             Some(ClientState::Connected)
                         } else {
@@ -259,7 +259,9 @@ impl ProtocolClient {
                 }
                 ProtocolPacket::Messages(mp) if self.state == ClientState::Connected => {
                     if self.xor_salt == Some(mp.xor_salt) {
-                        self.packeteer.process_incoming_packet(packet_len, mp)?;
+                        // this will consume the remaining cursor and parse out the messages
+                        self.packeteer
+                            .process_incoming_packet_payload(&mp.header, &mut cur)?;
                     }
                     None
                 }

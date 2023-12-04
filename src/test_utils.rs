@@ -9,7 +9,7 @@ use crate::*;
 pub fn init_logger() {
     let _ = env_logger::builder()
         .write_style(env_logger::WriteStyle::Always)
-        // .is_test(true)
+        .is_test(true)
         .try_init();
 }
 
@@ -48,8 +48,11 @@ impl MessageTestHarness {
     pub fn new(config: JitterPipeConfig) -> Self {
         let server_jitter_pipe = JitterPipe::<BufHandle>::new(config.clone());
         let client_jitter_pipe = JitterPipe::<BufHandle>::new(config);
-        let server = Packeteer::default();
-        let client = Packeteer::default();
+        let mut server = Packeteer::default();
+        let mut client = Packeteer::default();
+        server.set_xor_salt(Some(0));
+        client.set_xor_salt(Some(0));
+
         Self {
             server,
             client,
@@ -91,6 +94,9 @@ impl MessageTestHarness {
     }
     /// advances time, then advances the server first, then client.
     /// Transmits S2C and C2S messages via configured jitter pipes.
+    ///
+    /// # Panics
+    /// if packet writing fails
     pub fn advance(&mut self, dt: f64) -> &TransmissionStats {
         debug!("🟡 server.update({dt}) --> {} ----", self.server.time + dt);
         self.server.update(dt);
@@ -116,10 +122,10 @@ impl MessageTestHarness {
             client_received += 1;
             let packet_len = p.len();
             let mut reader = Cursor::new(p.as_slice());
-            match read_packet(&mut reader, &self.pool).unwrap() {
-                ProtocolPacket::Messages(mut m) => {
-                    self.client.process_incoming_packet(packet_len, m);
-                }
+            match read_packet(&mut reader).unwrap() {
+                ProtocolPacket::Messages(mut m) => self
+                    .client
+                    .process_incoming_packet_payload(&m.header, &mut reader),
                 _ => panic!("Invalid proto msg"),
             };
         }
@@ -136,10 +142,10 @@ impl MessageTestHarness {
             server_received += 1;
             let packet_len = p.len();
             let mut reader = Cursor::new(p.as_slice());
-            match read_packet(&mut reader, &self.pool).unwrap() {
-                ProtocolPacket::Messages(mut m) => {
-                    self.server.process_incoming_packet(packet_len, m);
-                }
+            match read_packet(&mut reader).unwrap() {
+                ProtocolPacket::Messages(mut m) => self
+                    .server
+                    .process_incoming_packet_payload(&m.header, &mut reader),
                 _ => panic!("Invalid proto msg"),
             };
         }
@@ -216,6 +222,9 @@ impl ProtocolTestHarness {
 
     /// advances time, then advances the server first, then client.
     /// Transmits S2C and C2S messages via configured jitter pipes.
+    ///
+    /// # Panics
+    /// if packet writing fails
     pub fn advance(&mut self, dt: f64) -> &TransmissionStats {
         trace!("🟡 server.update({dt}) --> {} ----", self.server.time + dt);
         self.server.update(dt);

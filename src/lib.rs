@@ -3,7 +3,7 @@
 #![deny(rustdoc::broken_intra_doc_links)]
 
 use byteorder::{NetworkEndian, WriteBytesExt};
-use cursor::{BufferLimitedWriter, CursorExtras};
+use cursor::BufferLimitedWriter;
 use log::*;
 use std::{
     collections::{HashMap, VecDeque},
@@ -19,7 +19,6 @@ mod error;
 mod jitter_pipe;
 mod message;
 mod message_reassembler;
-mod packet;
 mod protocol;
 mod received_message;
 mod sequence_buffer;
@@ -35,7 +34,6 @@ use error::*;
 use jitter_pipe::*;
 use message::*;
 use message_reassembler::*;
-use packet::*;
 // use protocol::*;
 use received_message::*;
 use sequence_buffer::*;
@@ -60,6 +58,8 @@ pub mod testing {
 }
 
 use protocol::*;
+
+use crate::cursor::CursorExtras;
 
 /// Identifies a packet - contains sequence number
 #[derive(Debug, Eq, PartialEq, Hash, Clone, Copy, PartialOrd, Ord, Default)]
@@ -252,7 +252,7 @@ impl Packeteer {
         self.sequence_id = self.sequence_id.wrapping_add(1);
         let id = PacketId(self.sequence_id);
         let num_acks_required = self.received_unacked_packets();
-        // info!("Num acks required in packet id {id:?} = {num_acks_required}");
+        info!("Num acks required in packet id {id:?} = {num_acks_required}");
         if num_acks_required > MAX_UNACKED_PACKETS {
             warn!("Not composing packet, backpressure.");
             return Err(PacketeerError::Backpressure(Backpressure::TooManyPending));
@@ -346,8 +346,9 @@ impl Packeteer {
             }
         }
 
-        if !sent_something {
-            // self.send_empty_packet()?;
+        // we should force send if still have ACKs to transmit that the remote hasn't acknowledged yet
+        if !sent_something && self.received_unacked_packets() > 0 {
+            self.send_empty_packet()?;
         }
         Ok(())
     }
@@ -433,6 +434,70 @@ impl Packeteer {
         }
     }
 
+    /// Parse and process Messages from cursor, where the provided header has already been read.
+    ///
+    /// Called by consumer with a packet they just read from the network.
+    /// Extracted messages are delivered to channels, acks are extracted for later consumption.
+    ///
+    /// # Errors
+    ///
+    /// * Can return a PacketeerError::Io if parsing packet headers or messages fails.
+    /// * Can return PacketeerError::StalePacket
+    /// * Can return PacketeerError::DuplicatePacket
+    pub(crate) fn process_incoming_packet_payload(
+        &mut self,
+        header: &ProtocolPacketHeader,
+        payload_reader: &mut Cursor<&[u8]>,
+    ) -> Result<(), PacketeerError> {
+        self.stats.packets_received += 1;
+        log::trace!(
+            "<<< Receiving packet id:{:?} ack_id:{:?}",
+            header.id(),
+            header.ack_id(),
+        );
+        // if this packet sequence is out of buffer range, reject as stale
+        if !self.received_buffer.check_sequence(header.id().0) {
+            log::debug!("Ignoring stale packet: {}", header.id().0);
+            self.stats.packets_stale += 1;
+            return Err(PacketeerError::StalePacket);
+        }
+
+        // TODO we can only reject older sequence numbers for unreliable unfragmented messages atm
+        // perhaps we need to delegate some checks to channels by passing the packetheader in?
+        if !self.received_buffer.check_newer_than_current(header.id().0) {
+            // log::debug!("Ignoring stale packet: {}", header.id().0);
+            // self.stats.packets_stale += 1;
+            // return Err(PacketeerError::StalePacket);
+        }
+
+        // if this packet was already received, reject as duplicate
+        if self.received_buffer.exists(header.id().0) {
+            log::debug!("Ignoring duplicate packet: {:?}", header.id());
+            self.stats.packets_duplicate += 1;
+            return Err(PacketeerError::DuplicatePacket);
+        }
+        let packet_len = header.size() + payload_reader.remaining() as usize;
+        self.received_buffer.insert(
+            header.id().0,
+            ReceivedMeta::new(self.time, self.config.packet_header_size + packet_len),
+        )?;
+        self.process_packet_acks_and_rtt(header);
+        // as long as there are bytes left to read, we should only find whole messages
+        while payload_reader.remaining() > 0 {
+            let msg = Message::parse(&self.pool, payload_reader)?;
+            self.stats.messages_received += 1;
+            info!("Parsed from packet: {msg:?}");
+            if let Some(channel) = self.channels.get_mut(msg.channel()) {
+                if channel.accepts_message(&msg) {
+                    self.dispatcher.process_received_message(msg);
+                } else {
+                    trace!("Channel rejects message id {msg:?}");
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Parse a received packet, reading the header and all messages contained within.
     ///
     /// Called by consumer with a packet they just read from the network.
@@ -443,7 +508,8 @@ impl Packeteer {
     /// * Can return a PacketeerError::Io if parsing packet headers or messages fails.
     /// * Can return PacketeerError::StalePacket
     /// * Can return PacketeerError::DuplicatePacket
-    pub(crate) fn process_incoming_packet<'a>(
+    /*
+    pub(crate) fn process_incoming_packet(
         &mut self,
         packet_len: usize,
         msg_packet: MessagesPacket,
@@ -497,6 +563,7 @@ impl Packeteer {
 
         Ok(())
     }
+    */
 
     /// Parses Messages from packet payload and delivers them to the dispatcher
     // fn process_packet_messages(
@@ -632,7 +699,7 @@ impl Packeteer {
         self.sent_buffer.get(sent_handle.0)
     }
 }
-/*
+
 #[cfg(test)]
 mod tests {
     use crate::jitter_pipe::JitterPipeConfig;
@@ -646,6 +713,8 @@ mod tests {
 
         let mut server = Packeteer::default();
         let mut client = Packeteer::default();
+        client.set_xor_salt(Some(0));
+        server.set_xor_salt(Some(0));
         let payload = b"hello";
         let _msg_id = server.send_message(0, payload);
 
@@ -653,7 +722,16 @@ mod tests {
         assert_eq!(to_send.len(), 1);
 
         info!("Sending first copy of packet");
-        assert!(client.process_incoming_packet(to_send[0].as_ref()).is_ok());
+
+        let mut cur = Cursor::new(to_send[0].as_slice());
+        let ProtocolPacket::Messages(MessagesPacket { header, .. }) =
+            read_packet(&mut cur).unwrap()
+        else {
+            panic!("err");
+        };
+        assert!(client
+            .process_incoming_packet_payload(&header, &mut cur)
+            .is_ok());
 
         let rec = client.drain_received_messages(0).next().unwrap();
         assert_eq!(rec.channel(), 0);
@@ -662,7 +740,13 @@ mod tests {
 
         // send dupe
         info!("Sending second (dupe) copy of packet");
-        match client.process_incoming_packet(to_send[0].as_ref()) {
+        let mut cur = Cursor::new(to_send[0].as_slice());
+        let ProtocolPacket::Messages(MessagesPacket { header, .. }) =
+            read_packet(&mut cur).unwrap()
+        else {
+            panic!("err");
+        };
+        match client.process_incoming_packet_payload(&header, &mut cur) {
             Err(PacketeerError::DuplicatePacket) => {}
             e => {
                 panic!("Should be dupe packet error, got: {:?}", e);
@@ -675,6 +759,8 @@ mod tests {
         crate::test_utils::init_logger();
         let mut server = Packeteer::default();
         let mut client = Packeteer::default();
+        client.set_xor_salt(Some(0));
+        server.set_xor_salt(Some(0));
         let msg = &[0x42_u8; 1024];
         let mut sent_ids = Vec::new();
         // sending this many full-packet-sized messages is the max we can send before acks arrive
@@ -687,7 +773,15 @@ mod tests {
         server.update(1.0);
         info!("Server sending to client..");
         server.drain_packets_to_send().for_each(|packet| {
-            client.process_incoming_packet(packet.as_ref()).unwrap();
+            let mut cur = Cursor::new(packet.as_slice());
+            let ProtocolPacket::Messages(MessagesPacket { header, .. }) =
+                read_packet(&mut cur).unwrap()
+            else {
+                panic!("err");
+            };
+            client
+                .process_incoming_packet_payload(&header, &mut cur)
+                .unwrap();
         });
         info!("sent_unacked is now: {}", server.sent_unacked_packets());
         info!("Send attempt for MAX_UNACKED_PACKETS+1");
@@ -703,7 +797,15 @@ mod tests {
             client.sent_unacked_packets()
         );
         client.drain_packets_to_send().for_each(|packet| {
-            server.process_incoming_packet(packet.as_ref()).unwrap();
+            let mut cur = Cursor::new(packet.as_slice());
+            let ProtocolPacket::Messages(MessagesPacket { header, .. }) =
+                read_packet(&mut cur).unwrap()
+            else {
+                panic!("err");
+            };
+            server
+                .process_incoming_packet_payload(&header, &mut cur)
+                .unwrap();
         });
 
         assert_eq!(sent_ids.len(), client.drain_received_messages(0).len());
@@ -718,6 +820,8 @@ mod tests {
 
         let mut server = Packeteer::default();
         let mut client = Packeteer::default();
+        client.set_xor_salt(Some(0));
+        server.set_xor_salt(Some(0));
 
         let delta_time = 0.01;
         let mut server_sent = Vec::new();
@@ -733,7 +837,16 @@ mod tests {
 
             // forward packets to their endpoints
             server.drain_packets_to_send().for_each(|packet| {
-                client.process_incoming_packet(packet.as_ref()).unwrap();
+                let mut cur = Cursor::new(packet.as_slice());
+                let ProtocolPacket::Messages(MessagesPacket { header, .. }) =
+                    read_packet(&mut cur).unwrap()
+                else {
+                    panic!("err");
+                };
+
+                client
+                    .process_incoming_packet_payload(&header, &mut cur)
+                    .unwrap();
                 assert_eq!(
                     test_data,
                     client
@@ -746,7 +859,15 @@ mod tests {
             });
             assert!(!server.has_packets_to_send());
             client.drain_packets_to_send().for_each(|packet| {
-                server.process_incoming_packet(packet.as_ref()).unwrap();
+                let mut cur = Cursor::new(packet.as_slice());
+                let ProtocolPacket::Messages(MessagesPacket { header, .. }) =
+                    read_packet(&mut cur).unwrap()
+                else {
+                    panic!("err");
+                };
+                server
+                    .process_incoming_packet_payload(&header, &mut cur)
+                    .unwrap();
                 assert_eq!(
                     test_data,
                     server
@@ -819,11 +940,12 @@ mod tests {
 
         let mut buffer = Vec::new();
         let mut cur = Cursor::new(&mut buffer);
-        let write_packet = PacketHeader::new(write_id, ack_iter, 1).unwrap();
+        let write_packet =
+            ProtocolPacketHeader::new(write_id, ack_iter, 1, PacketType::Messages).unwrap();
         write_packet.write(&mut cur).unwrap();
 
         let mut reader = Cursor::new(buffer.as_ref());
-        let read_packet = PacketHeader::parse(&mut reader).unwrap();
+        let read_packet = ProtocolPacketHeader::parse(&mut reader).unwrap();
 
         assert_eq!(write_packet.id(), read_packet.id());
         assert_eq!(write_packet.ack_id(), read_packet.ack_id());
@@ -837,7 +959,7 @@ mod tests {
     fn small_unfrag_messages() {
         crate::test_utils::init_logger();
         let channel = 0;
-        let mut harness = TestHarness::new(JitterPipeConfig::disabled());
+        let mut harness = MessageTestHarness::new(JitterPipeConfig::disabled());
 
         let msg1 = b"Hello";
         let msg2 = b"world";
@@ -872,7 +994,7 @@ mod tests {
     fn frag_message() {
         crate::test_utils::init_logger();
         let channel = 0;
-        let mut harness = TestHarness::new(JitterPipeConfig::disabled());
+        let mut harness = MessageTestHarness::new(JitterPipeConfig::disabled());
 
         let mut msg = Vec::new();
         msg.extend_from_slice(&[65; 1024]);
@@ -905,7 +1027,7 @@ mod tests {
         crate::test_utils::init_logger();
         let pool = BufPool::empty();
         let channel = 0;
-        let mut harness = TestHarness::new(JitterPipeConfig::disabled());
+        let mut harness = MessageTestHarness::new(JitterPipeConfig::disabled());
         let payload = b"hello";
         harness
             .server
@@ -928,7 +1050,7 @@ mod tests {
     #[test]
     fn retransmission() {
         let channel = 1;
-        let mut harness = TestHarness::new(JitterPipeConfig::disabled());
+        let mut harness = MessageTestHarness::new(JitterPipeConfig::disabled());
         // big enough to require 2 packets
         let payload = random_payload(1800);
         let id = harness
@@ -956,4 +1078,3 @@ mod tests {
         assert!(to_send[0].len() < 50);
     }
 }
-*/

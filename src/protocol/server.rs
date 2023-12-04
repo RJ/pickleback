@@ -30,8 +30,6 @@ impl std::fmt::Debug for PendingClient {
 
 // When server gets a Connection Challenge Response, it promotes from PendingClient to ConnectedClient
 pub(crate) struct ConnectedClient {
-    client_salt: u64,
-    server_salt: u64,
     xor_salt: u64,
     socket_addr: SocketAddr,
     confirmed: bool,
@@ -138,7 +136,7 @@ impl ProtocolServer {
                 let keepalive = ProtocolPacket::KeepAlive(KeepAlivePacket {
                     header: cc.packeteer.next_packet_header(PacketType::KeepAlive)?,
                     xor_salt: cc.xor_salt,
-                    client_index: 0,
+                    client_index: cc.client_index.unwrap_or_default(), // TODO
                 });
                 self.outbox.push_back(AddressedPacket {
                     address: cc.socket_addr,
@@ -156,6 +154,18 @@ impl ProtocolServer {
                 );
             if self.outbox.len() != pre_len {
                 cc.last_sent_time = self.time;
+                // } else if cc.packeteer.received_unacked_packets() > 0 {
+                //     // still have acks to deliver? send a ka packet just for acks.
+                //     let keepalive = ProtocolPacket::KeepAlive(KeepAlivePacket {
+                //         header: cc.packeteer.next_packet_header(PacketType::KeepAlive)?,
+                //         xor_salt: cc.xor_salt,
+                //         client_index: cc.client_index.unwrap_or_default(), // TODO
+                //     });
+                //     self.outbox.push_back(AddressedPacket {
+                //         address: cc.socket_addr,
+                //         packet: write_packet(&self.pool, keepalive)?,
+                //     });
+                //     cc.last_sent_time = self.time;
             }
         }
         Ok(())
@@ -222,9 +232,8 @@ impl ProtocolServer {
         packet: &[u8],
         client_addr: SocketAddr,
     ) -> Result<(), PacketeerError> {
-        let packet_len = packet.len();
         let mut cur = Cursor::new(packet);
-        let packet = read_packet(&mut cur, &self.pool)?;
+        let packet = read_packet(&mut cur)?;
         log::info!("server got >>> {packet:?}");
         match packet {
             ProtocolPacket::ConnectionRequest(ConnectionRequestPacket {
@@ -267,20 +276,17 @@ impl ProtocolServer {
                 }
             }
             ProtocolPacket::ConnectionChallengeResponse(ConnectionChallengeResponsePacket {
-                header,
+                header: _,
                 xor_salt,
             }) => {
                 // there should be a pending client when we get a challenge response
                 if let Some(pending) = self.take_pending_by_xor_salt(xor_salt, client_addr) {
-                    let xor_salt = pending.client_salt ^ pending.server_salt;
                     let mut packeteer = pending.packeteer;
                     packeteer.xor_salt = Some(xor_salt);
                     let mut cc = ConnectedClient {
                         confirmed: false,
                         client_index: None,
-                        client_salt: pending.client_salt,
-                        server_salt: pending.server_salt,
-                        xor_salt,
+                        xor_salt: pending.client_salt ^ pending.server_salt,
                         last_received_time: self.time,
                         last_sent_time: self.time,
                         socket_addr: client_addr,
@@ -318,7 +324,10 @@ impl ProtocolServer {
                 }
             }
 
-            ProtocolPacket::Disconnect(DisconnectPacket { header, xor_salt }) => {
+            ProtocolPacket::Disconnect(DisconnectPacket {
+                header: _,
+                xor_salt,
+            }) => {
                 if let Some(cc) = self.remove_connected_client(xor_salt, client_addr) {
                     log::info!("REMOVED CLIENT: {:?}", cc.socket_addr);
                 }
@@ -335,6 +344,7 @@ impl ProtocolServer {
                         cc.confirmed = true;
                     }
                     cc.last_received_time = time;
+                    cc.packeteer.process_packet_acks_and_rtt(&header);
                 } else {
                     log::warn!("Discarding KA packet, no session");
                 }
@@ -347,7 +357,9 @@ impl ProtocolServer {
                         log::info!("Marking cc as confirmed due to messages");
                         cc.confirmed = true;
                     }
-                    cc.packeteer.process_incoming_packet(packet_len, mp)?;
+                    // this will consume the remaining cursor and parse out the messages
+                    cc.packeteer
+                        .process_incoming_packet_payload(&mp.header, &mut cur)?;
                 } else {
                     log::warn!(
                         "Server Discarding messages packet, no session {client_addr} = {mp:?}"

@@ -42,6 +42,7 @@ be sent in each direction at least 20 times a second even if there are no explic
 ## Example
 
 ```rust
+/*
 use packeteer::prelude::*;
 
 // Packeteer is just an endpoint, and server and client are simply names here.
@@ -58,8 +59,10 @@ let msg_id: MessageId = server.send_message(channel, b"hello").unwrap();
 // update server clock, and transmit server packets to the client
 server.update(1.0);
 server.drain_packets_to_send().for_each(|packet| {
-    // this is where you send the packet over UDP or something
-    client.process_incoming_packet(packet.as_ref()).unwrap();
+    // (this is where you send the packet over UDP or something)
+    let mut cur = Cursor::new(packet.as_slice());
+    let ProtocolPacket::Messages(MessagesPacket{ header, ..}) = read_packet(&mut cur).unwrap() else { panic!()l };
+    client.process_incoming_packet(&header, &mut cur).unwrap();
 });
 
 // client will have received a message:
@@ -80,6 +83,7 @@ client.drain_packets_to_send().for_each(|packet| {
 
 // now the client has sent packets to the server, the server will have received an ack
 assert_eq!(vec![msg_id], server.drain_message_acks(channel).collect::<Vec<_>>());
+*/
 ```
 
 ## Protocol Overview

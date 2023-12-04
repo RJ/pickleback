@@ -2,7 +2,6 @@ use crate::{
     ack_header::AckHeader,
     buffer_pool::{BufHandle, BufPool},
     cursor::{BufferLimitedWriter, CursorExtras},
-    message::Message,
     PacketId, PacketeerError,
 };
 use byteorder::*;
@@ -205,7 +204,7 @@ pub(crate) struct ConnectionDeniedPacket {
 pub(crate) struct MessagesPacket {
     pub(crate) header: ProtocolPacketHeader,
     pub(crate) xor_salt: u64,
-    pub(crate) messages: Vec<Message>, // Box<dyn Iterator<Item = Result<Message, PacketeerError>> + 'a>, //Vec<Message>,
+    // pub(crate) messages: Vec<Message>, // Box<dyn Iterator<Item = Result<Message, PacketeerError>> + 'a>, //Vec<Message>,
 }
 
 impl std::fmt::Debug for MessagesPacket {
@@ -300,10 +299,7 @@ pub(crate) fn write_packet(
     Ok(buffer)
 }
 
-pub(crate) fn read_packet(
-    reader: &mut Cursor<&[u8]>,
-    pool: &BufPool,
-) -> Result<ProtocolPacket, PacketeerError> {
+pub(crate) fn read_packet(reader: &mut Cursor<&[u8]>) -> Result<ProtocolPacket, PacketeerError> {
     let header = ProtocolPacketHeader::parse(reader)?;
     match header.packet_type {
         PacketType::KeepAlive => {
@@ -358,16 +354,14 @@ pub(crate) fn read_packet(
         }
         PacketType::Messages => {
             let xor_salt = reader.read_u64::<NetworkEndian>()?;
-            let mut messages = Vec::new();
-            while reader.remaining() > 0 {
-                // as long as there are bytes left to read, we should only find whole messages
-                messages.push(Message::parse(pool, reader)?);
-            }
-            let c = MessagesPacket {
-                header,
-                xor_salt,
-                messages,
-            };
+            // let mut messages = Vec::new();
+            // while reader.remaining() > 0 {
+            //     // as long as there are bytes left to read, we should only find whole messages
+            //     messages.push(Message::parse(pool, reader)?);
+            // }
+            // up to caller to parse payload from cursor and extract messages.
+            // TODO enclose with message iterator?
+            let c = MessagesPacket { header, xor_salt };
             Ok(ProtocolPacket::Messages(c))
         }
         PacketType::Disconnect => {
