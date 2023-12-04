@@ -1,6 +1,6 @@
 use std::{io::Cursor, net::SocketAddr};
 
-use crate::{buffer_pool::BufPool, prelude::PacketeerError, Packeteer};
+use crate::{buffer_pool::BufPool, prelude::PicklebackError, Pickleback};
 
 use super::*;
 
@@ -36,7 +36,7 @@ pub struct ProtocolClient {
     out_buffer: Vec<AddressedPacket>,
     last_receive_time: f64,
     last_send_time: f64,
-    pub(crate) packeteer: Packeteer,
+    pub(crate) pickleback: Pickleback,
     server_addr: SocketAddr,
     pool: BufPool,
 }
@@ -53,7 +53,7 @@ impl ProtocolClient {
             last_receive_time: 0.0,
             last_send_time: 0.0,
             out_buffer: Vec::new(),
-            packeteer: Packeteer::default(),
+            pickleback: Pickleback::default(),
             server_addr: "127.0.0.1:6000".parse().expect("Invalid server address"),
             pool: BufPool::default(),
         }
@@ -73,7 +73,7 @@ impl ProtocolClient {
         self.state = new_state;
         self.proto_last_send = 0.0;
 
-        self.packeteer.set_xor_salt(self.xor_salt);
+        self.pickleback.set_xor_salt(self.xor_salt);
     }
 
     /// Cleanly disconnect from the server. This may add packets to the out_buffer for you
@@ -108,7 +108,7 @@ impl ProtocolClient {
 
     /// Serializes the ProtocolPacket, wraps in AddressedPacket with the server_addr, and appends
     /// to self.out_buffer for sending.
-    pub(crate) fn send(&mut self, packet: ProtocolPacket) -> Result<(), PacketeerError> {
+    pub(crate) fn send(&mut self, packet: ProtocolPacket) -> Result<(), PicklebackError> {
         let ap = AddressedPacket {
             address: self.server_addr,
             packet: write_packet(&self.pool, packet)?,
@@ -119,21 +119,21 @@ impl ProtocolClient {
     }
 
     /// In case we aren't fully connected, this could be resending challenge responses etc.
-    /// If we are connected, it delegates to packeteer for messages packets.
+    /// If we are connected, it delegates to pickleback for messages packets.
     pub fn drain_packets_to_send(
         &mut self,
-    ) -> Result<std::vec::Drain<'_, AddressedPacket>, PacketeerError> {
+    ) -> Result<std::vec::Drain<'_, AddressedPacket>, PicklebackError> {
         match self.state {
             ClientState::SelfInitiatedDisconnect if self.xor_salt.is_some() => {
                 for _ in 0..10 {
                     let d = ProtocolPacket::Disconnect(DisconnectPacket {
-                        header: self.packeteer.next_packet_header(PacketType::Disconnect)?,
+                        header: self.pickleback.next_packet_header(PacketType::Disconnect)?,
                         xor_salt: self.xor_salt.unwrap(),
                     });
                     self.send(d)?;
                 }
                 log::info!("Reseting Protocol Client state after disconnect");
-                // TODO reset more, like packeteer
+                // TODO reset more, like pickleback
                 self.client_salt = None;
                 self.server_salt = None;
                 self.xor_salt = None;
@@ -142,7 +142,7 @@ impl ProtocolClient {
             ClientState::SendingConnectionRequest if self.proto_last_send < self.time - 0.1 => {
                 self.proto_last_send = self.time;
                 let header = self
-                    .packeteer
+                    .pickleback
                     .next_packet_header(PacketType::ConnectionRequest)?;
                 self.send(ProtocolPacket::ConnectionRequest(ConnectionRequestPacket {
                     protocol_version: PROTOCOL_VERSION,
@@ -156,7 +156,7 @@ impl ProtocolClient {
             {
                 self.proto_last_send = self.time;
                 let header = self
-                    .packeteer
+                    .pickleback
                     .next_packet_header(PacketType::ConnectionChallengeResponse)?;
                 self.send(ProtocolPacket::ConnectionChallengeResponse(
                     ConnectionChallengeResponsePacket {
@@ -170,7 +170,7 @@ impl ProtocolClient {
                 // TODO this would be better bypassing out_buffer
                 self.out_buffer
                     .extend(
-                        self.packeteer
+                        self.pickleback
                             .drain_packets_to_send()
                             .map(|buf| AddressedPacket {
                                 address: self.server_addr,
@@ -181,7 +181,7 @@ impl ProtocolClient {
                 if self.out_buffer.is_empty() && self.time - self.last_send_time >= 0.1 {
                     log::info!("Client is sending keepalive");
                     let keepalive = ProtocolPacket::KeepAlive(KeepAlivePacket {
-                        header: self.packeteer.next_packet_header(PacketType::KeepAlive)?,
+                        header: self.pickleback.next_packet_header(PacketType::KeepAlive)?,
                         client_index: 0,
                         xor_salt: self
                             .xor_salt
@@ -196,7 +196,7 @@ impl ProtocolClient {
         Ok(self.out_buffer.drain(..))
     }
 
-    pub fn receive(&mut self, packet: &[u8], source: SocketAddr) -> Result<(), PacketeerError> {
+    pub fn receive(&mut self, packet: &[u8], source: SocketAddr) -> Result<(), PicklebackError> {
         assert_eq!(source, self.server_addr, "source and server addr mismatch"); // TODO
         let mut cur = Cursor::new(packet);
         let new_state = {
@@ -212,7 +212,7 @@ impl ProtocolClient {
                     if let Some(self_client_salt) = self.client_salt {
                         if self_client_salt != client_salt {
                             log::warn!("client salt mismatch: {packet:?}");
-                            return Err(PacketeerError::InvalidPacket); // TODO error
+                            return Err(PicklebackError::InvalidPacket); // TODO error
                         }
                         self.server_salt = Some(server_salt);
                         let client_salt_xor_server_salt = server_salt ^ self_client_salt;
@@ -247,7 +247,7 @@ impl ProtocolClient {
                 {
                     if self.xor_salt == Some(xor_salt) {
                         self.last_receive_time = self.time;
-                        self.packeteer.process_packet_acks_and_rtt(&header);
+                        self.pickleback.process_packet_acks_and_rtt(&header);
                         if self.state == ClientState::SendingChallengeResponse {
                             Some(ClientState::Connected)
                         } else {
@@ -260,7 +260,7 @@ impl ProtocolClient {
                 ProtocolPacket::Messages(mp) if self.state == ClientState::Connected => {
                     if self.xor_salt == Some(mp.xor_salt) {
                         // this will consume the remaining cursor and parse out the messages
-                        self.packeteer
+                        self.pickleback
                             .process_incoming_packet_payload(&mp.header, &mut cur)?;
                     }
                     None

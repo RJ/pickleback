@@ -1,7 +1,7 @@
 use crate::{
     buffer_pool::{BufHandle, BufPool},
     cursor::CursorExtras,
-    PacketeerError,
+    PicklebackError,
 };
 use byteorder::{NetworkEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{Cursor, Read, Write};
@@ -32,7 +32,7 @@ impl Fragment {
         mut writer: impl std::io::Write,
         payload_len: u16,
         size_mode: MessageSizeMode,
-    ) -> Result<(), PacketeerError> {
+    ) -> Result<(), PicklebackError> {
         match size_mode {
             MessageSizeMode::Small => {
                 writer.write_u8(self.index as u8)?;
@@ -52,7 +52,7 @@ impl Fragment {
             log::error!(
                 "Non-final fragment should always have payload size 1024. got {payload_len}."
             );
-            return Err(PacketeerError::InvalidMessage);
+            return Err(PicklebackError::InvalidMessage);
         }
         Ok(())
     }
@@ -61,7 +61,7 @@ impl Fragment {
         reader: &mut Cursor<&[u8]>,
         size_mode: MessageSizeMode,
         id: MessageId,
-    ) -> Result<(Self, u16), PacketeerError> {
+    ) -> Result<(Self, u16), PicklebackError> {
         let (fragment_id, num_fragments) = match size_mode {
             MessageSizeMode::Small => (reader.read_u8()? as u16, reader.read_u8()? as u16),
             MessageSizeMode::Large => (
@@ -238,7 +238,7 @@ impl Message {
         size_mode: MessageSizeMode,
         channel: u8,
         payload_len: usize,
-    ) -> Result<(), PacketeerError> {
+    ) -> Result<(), PicklebackError> {
         // three bits are reserved for flags:
         // * is fragment?
         // * size mode large?
@@ -272,7 +272,7 @@ impl Message {
         Ok(())
     }
 
-    pub fn parse(pool: &BufPool, reader: &mut Cursor<&[u8]>) -> Result<Self, PacketeerError> {
+    pub fn parse(pool: &BufPool, reader: &mut Cursor<&[u8]>) -> Result<Self, PicklebackError> {
         let prefix_byte = reader.read_u8()?;
         let fragmented = prefix_byte & 1 != 0;
         let size_mode = if prefix_byte & (1 << 1) != 0 {
@@ -298,7 +298,7 @@ impl Message {
         let mut buf = pool.get_buffer(payload_size as usize);
         if reader.remaining() < payload_size as u64 {
             log::warn!("Payload appears truncated for message {id:?}");
-            return Err(PacketeerError::InvalidMessage);
+            return Err(PicklebackError::InvalidMessage);
         }
         reader.take(payload_size as u64).read_to_end(&mut buf)?;
 

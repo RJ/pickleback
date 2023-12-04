@@ -2,7 +2,7 @@ use crate::{
     ack_header::AckHeader,
     buffer_pool::{BufHandle, BufPool},
     cursor::{BufferLimitedWriter, CursorExtras},
-    PacketId, PacketeerError,
+    PacketId, PicklebackError,
 };
 use byteorder::*;
 use std::{
@@ -47,7 +47,7 @@ pub(crate) enum PacketType {
 }
 
 impl TryFrom<u8> for PacketType {
-    type Error = PacketeerError;
+    type Error = PicklebackError;
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
@@ -58,7 +58,7 @@ impl TryFrom<u8> for PacketType {
             5 => Ok(PacketType::Messages),
             6 => Ok(PacketType::Disconnect),
             7 => Ok(PacketType::KeepAlive),
-            _ => Err(PacketeerError::InvalidPacket),
+            _ => Err(PicklebackError::InvalidPacket),
         }
     }
 }
@@ -92,7 +92,7 @@ impl ProtocolPacketHeader {
         ack_iter: impl Iterator<Item = (u16, bool)>,
         num_acks: u16,
         packet_type: PacketType,
-    ) -> Result<Self, PacketeerError> {
+    ) -> Result<Self, PicklebackError> {
         if num_acks == 0 {
             return Self::new_no_acks(id, packet_type);
         }
@@ -106,7 +106,7 @@ impl ProtocolPacketHeader {
     pub(crate) fn new_no_acks(
         id: PacketId,
         packet_type: PacketType,
-    ) -> Result<Self, PacketeerError> {
+    ) -> Result<Self, PicklebackError> {
         Ok(Self {
             packet_type,
             id,
@@ -135,7 +135,7 @@ impl ProtocolPacketHeader {
         self.ack_header.map_or(0, |header| header.size())
     }
 
-    pub(crate) fn write(&self, mut writer: &mut impl Write) -> Result<(), PacketeerError> {
+    pub(crate) fn write(&self, mut writer: &mut impl Write) -> Result<(), PicklebackError> {
         let mut prefix_byte = self.packet_type as u8;
         if self.ack_header.is_some() {
             // highest bit denotes presence of ack header
@@ -148,12 +148,12 @@ impl ProtocolPacketHeader {
         }
         Ok(())
     }
-    pub(crate) fn parse(reader: &mut Cursor<&[u8]>) -> Result<Self, PacketeerError> {
+    pub(crate) fn parse(reader: &mut Cursor<&[u8]>) -> Result<Self, PicklebackError> {
         let prefix_byte = reader.read_u8()?;
         let ack_header_present = prefix_byte & 0b1000_0000 != 0;
         let Ok(packet_type) = PacketType::try_from(prefix_byte & 0b0111_1111) else {
             log::error!("prefix byte packet type invalid");
-            return Err(PacketeerError::InvalidPacket);
+            return Err(PicklebackError::InvalidPacket);
         };
         let id = PacketId(reader.read_u16::<NetworkEndian>()?);
         let ack_header = if ack_header_present {
@@ -204,7 +204,7 @@ pub(crate) struct ConnectionDeniedPacket {
 pub(crate) struct MessagesPacket {
     pub(crate) header: ProtocolPacketHeader,
     pub(crate) xor_salt: u64,
-    // pub(crate) messages: Vec<Message>, // Box<dyn Iterator<Item = Result<Message, PacketeerError>> + 'a>, //Vec<Message>,
+    // pub(crate) messages: Vec<Message>, // Box<dyn Iterator<Item = Result<Message, PicklebackError>> + 'a>, //Vec<Message>,
 }
 
 impl std::fmt::Debug for MessagesPacket {
@@ -240,7 +240,7 @@ fn write_zero_bytes<W: Write>(writer: &mut W, num_bytes: usize) -> std::io::Resu
 pub(crate) fn write_packet(
     pool: &BufPool,
     packet: ProtocolPacket,
-) -> Result<BufHandle, PacketeerError> {
+) -> Result<BufHandle, PicklebackError> {
     let max_packet_size = 1180; // TODO config here
     let mut buffer = pool.get_buffer(max_packet_size);
     let mut writer = BufferLimitedWriter::new(Cursor::new(&mut buffer), max_packet_size);
@@ -299,7 +299,7 @@ pub(crate) fn write_packet(
     Ok(buffer)
 }
 
-pub(crate) fn read_packet(reader: &mut Cursor<&[u8]>) -> Result<ProtocolPacket, PacketeerError> {
+pub(crate) fn read_packet(reader: &mut Cursor<&[u8]>) -> Result<ProtocolPacket, PicklebackError> {
     let header = ProtocolPacketHeader::parse(reader)?;
     match header.packet_type {
         PacketType::KeepAlive => {
@@ -318,7 +318,7 @@ pub(crate) fn read_packet(reader: &mut Cursor<&[u8]>) -> Result<ProtocolPacket, 
             };
             if reader.remaining() != 500 {
                 log::warn!("Invalid remaining len for ConnectionRequestPacket");
-                return Err(PacketeerError::InvalidPacket);
+                return Err(PicklebackError::InvalidPacket);
             }
             Ok(ProtocolPacket::ConnectionRequest(c))
         }
@@ -330,7 +330,7 @@ pub(crate) fn read_packet(reader: &mut Cursor<&[u8]>) -> Result<ProtocolPacket, 
             };
             if reader.remaining() != 500 {
                 log::warn!("Invalid remaining len for ConnectionChallengePacket");
-                return Err(PacketeerError::InvalidPacket);
+                return Err(PicklebackError::InvalidPacket);
             }
             Ok(ProtocolPacket::ConnectionChallenge(c))
         }
@@ -341,7 +341,7 @@ pub(crate) fn read_packet(reader: &mut Cursor<&[u8]>) -> Result<ProtocolPacket, 
             };
             if reader.remaining() != 500 {
                 log::warn!("Invalid remaining len for ConnectionChallengeResponsePacket");
-                return Err(PacketeerError::InvalidPacket);
+                return Err(PicklebackError::InvalidPacket);
             }
             Ok(ProtocolPacket::ConnectionChallengeResponse(c))
         }
@@ -380,7 +380,7 @@ pub(crate) fn read_packet(reader: &mut Cursor<&[u8]>) -> Result<ProtocolPacket, 
 // }
 
 // impl<'a> Iterator for MessageIterator<'a> {
-//     type Item = Result<Message, PacketeerError>;
+//     type Item = Result<Message, PicklebackError>;
 
 //     fn next(&mut self) -> Option<Self::Item> {
 //         if self.reader.remaining() > 0 {

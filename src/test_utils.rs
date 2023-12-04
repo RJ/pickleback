@@ -34,10 +34,10 @@ pub struct TransmissionStats {
     pub client_received: u32,
 }
 
-/// A test harness that creates two Packeteer endpoints, and "connects" them via JitterPipes
+/// A test harness that creates two Pickleback endpoints, and "connects" them via JitterPipes
 pub struct MessageTestHarness {
-    pub server: Packeteer,
-    pub client: Packeteer,
+    pub server: Pickleback,
+    pub client: Pickleback,
     pub server_jitter_pipe: JitterPipe<BufHandle>,
     pub client_jitter_pipe: JitterPipe<BufHandle>,
     server_drop_indices: Option<Vec<u32>>,
@@ -48,8 +48,8 @@ impl MessageTestHarness {
     pub fn new(config: JitterPipeConfig) -> Self {
         let server_jitter_pipe = JitterPipe::<BufHandle>::new(config.clone());
         let client_jitter_pipe = JitterPipe::<BufHandle>::new(config);
-        let mut server = Packeteer::default();
-        let mut client = Packeteer::default();
+        let mut server = Pickleback::default();
+        let mut client = Pickleback::default();
         server.set_xor_salt(Some(0));
         client.set_xor_salt(Some(0));
 
@@ -159,7 +159,7 @@ impl MessageTestHarness {
     }
 }
 
-/// A test harness that creates two Packeteer endpoints, and "connects" them via JitterPipes
+/// A test harness that creates two Pickleback endpoints, and "connects" them via JitterPipes
 pub struct ProtocolTestHarness {
     pub server: ProtocolServer,
     pub client: ProtocolClient,

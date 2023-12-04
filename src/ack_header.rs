@@ -1,4 +1,4 @@
-use crate::prelude::PacketeerError;
+use crate::prelude::PicklebackError;
 use crate::PacketId;
 use crate::ReceivedMeta;
 use crate::SequenceBuffer;
@@ -81,7 +81,7 @@ impl AckHeader {
         2 + // ack_id u16
         self.num_bytes_needed as usize
     }
-    pub(crate) fn write(&self, writer: &mut impl Write) -> Result<usize, PacketeerError> {
+    pub(crate) fn write(&self, writer: &mut impl Write) -> Result<usize, PicklebackError> {
         writer.write_u16::<NetworkEndian>(self.ack_id.0)?;
         writer.write_all(&self.bit_buffer[..self.num_bytes_needed as usize])?;
         Ok(self.num_bytes_needed as usize + 2)
@@ -91,7 +91,7 @@ impl AckHeader {
     pub(crate) fn from_ack_iter(
         num_acks: u16,
         ack_iter: impl Iterator<Item = (u16, bool)>,
-    ) -> Result<Self, PacketeerError> {
+    ) -> Result<Self, PicklebackError> {
         let mut peekable_iter = ack_iter.peekable();
         // peek the first id, which is always the most recent ack, and gets written as a u16
         // all prior acks get 1 bit, the offset of which is relative to the first ack id.
@@ -127,7 +127,7 @@ impl AckHeader {
         })
     }
 
-    pub(crate) fn parse(reader: &mut Cursor<&[u8]>) -> Result<Self, PacketeerError> {
+    pub(crate) fn parse(reader: &mut Cursor<&[u8]>) -> Result<Self, PicklebackError> {
         let ack_id = PacketId(reader.read_u16::<NetworkEndian>()?);
         let mut bit_buffer = [0_u8; MAX_ACK_BYTES as usize];
         let mut writer = &mut bit_buffer[..];

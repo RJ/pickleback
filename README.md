@@ -1,4 +1,4 @@
-# Packeteer
+# Pickleback
 
 A way to multiplex and coalesce messages over an unreliable stream of datagrams, for game netcode.
 
@@ -43,12 +43,12 @@ be sent in each direction at least 20 times a second even if there are no explic
 
 ```rust
 /*
-use packeteer::prelude::*;
+use pickleback::prelude::*;
 
-// Packeteer is just an endpoint, and server and client are simply names here.
+// Pickleback is just an endpoint, and server and client are simply names here.
 // both ends of the connection behave identically.
-let mut server = Packeteer::default();
-let mut client = Packeteer::default();
+let mut server = Pickleback::default();
+let mut client = Pickleback::default();
 
 let channel: u8 = 0;
 

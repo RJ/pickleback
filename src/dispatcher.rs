@@ -26,7 +26,7 @@ pub(crate) struct MessageDispatcher {
 }
 
 impl MessageDispatcher {
-    pub(crate) fn new(config: &PacketeerConfig) -> Self {
+    pub(crate) fn new(config: &PicklebackConfig) -> Self {
         Self {
             next_message_id: 0,
             sent_frag_map: SentFragMap::with_capacity(config.sent_frag_map_size),
@@ -72,7 +72,7 @@ impl MessageDispatcher {
         &mut self,
         packet_handle: PacketId,
         message_handles: Vec<MessageHandle>,
-    ) -> Result<(), PacketeerError> {
+    ) -> Result<(), PicklebackError> {
         trace!(">>> {packet_handle:?} CONTAINS msg ids: {message_handles:?}");
         self.messages_in_packets
             .insert(packet_handle.0, message_handles)?;
@@ -121,7 +121,7 @@ impl MessageDispatcher {
         pool: &BufPool,
         channel: &mut Channel,
         payload: &[u8],
-    ) -> Result<MessageId, PacketeerError> {
+    ) -> Result<MessageId, PicklebackError> {
         if payload.len() <= 1024 {
             let id = self.next_message_id();
             channel.enqueue_message(pool, id, payload, Fragmented::No);
@@ -136,7 +136,7 @@ impl MessageDispatcher {
         pool: &BufPool,
         channel: &mut Channel,
         payload: &[u8],
-    ) -> Result<MessageId, PacketeerError> {
+    ) -> Result<MessageId, PicklebackError> {
         assert!(payload.len() > 1024);
         let full_payload_size = payload.len();
         // split into multiple messages.
@@ -209,7 +209,7 @@ impl SentFragMap {
         &mut self,
         id: MessageId,
         fragment_ids: Vec<MessageId>,
-    ) -> Result<(), PacketeerError> {
+    ) -> Result<(), PicklebackError> {
         match self.m.insert(id.0, FragAckStatus::Partial(fragment_ids)) {
             Ok(_) => Ok(()),
             Err(e) => Err(e),

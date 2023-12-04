@@ -1,11 +1,11 @@
-extern crate packeteer;
+extern crate pickleback;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 
 use log::*;
-use packeteer::prelude::*;
-use packeteer::testing::*;
+use pickleback::prelude::*;
+use pickleback::testing::*;
 
 /// How many messages to send during soak tests:
 const NUM_TEST_MSGS: usize = 100000;
@@ -106,7 +106,7 @@ fn soak_reliable_message_transmission_with_terrible_network() {
                     unacked_sent_msg_ids.push(msg_id);
                     i += 1;
                 }
-                Err(PacketeerError::Backpressure(Backpressure::TooManyPending)) => {
+                Err(PicklebackError::Backpressure(Backpressure::TooManyPending)) => {
                     warn!("Backpressure");
                 }
                 Err(e) => panic!("Unhandled send error {e:?}"),

@@ -1,6 +1,6 @@
-/// Packeteer specific errors
+/// Pickleback specific errors
 #[derive(Debug)]
-pub enum PacketeerError {
+pub enum PicklebackError {
     /// A wrapped io:Error
     Io(std::io::Error),
     /// Tried to insert into a sequence buffer, but sequence is too old for buffer
@@ -30,13 +30,13 @@ pub enum Backpressure {
     // TODO: bandwidth related reasons, once implemented.
 }
 
-impl std::fmt::Display for PacketeerError {
+impl std::fmt::Display for PicklebackError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{self:?}")
     }
 }
 
-impl std::error::Error for PacketeerError {
+impl std::error::Error for PicklebackError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(err) => Some(err),
@@ -45,8 +45,8 @@ impl std::error::Error for PacketeerError {
     }
 }
 
-impl From<std::io::Error> for PacketeerError {
+impl From<std::io::Error> for PicklebackError {
     fn from(err: std::io::Error) -> Self {
-        PacketeerError::Io(err)
+        PicklebackError::Io(err)
     }
 }

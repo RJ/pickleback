@@ -2,7 +2,7 @@ use crate::PacketId;
 
 /// Stats object
 #[derive(Default, Debug, Clone)]
-pub struct PacketeerStats {
+pub struct PicklebackStats {
     /// Number of packets sent
     pub packets_sent: u64,
     /// Number of packets received

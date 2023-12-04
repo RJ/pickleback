@@ -42,12 +42,12 @@ use tracking::*;
 /// Easy importing of all the important bits
 pub mod prelude {
     pub use super::buffer_pool::PoolConfig;
-    pub use super::config::PacketeerConfig;
-    pub use super::error::{Backpressure, PacketeerError};
+    pub use super::config::PicklebackConfig;
+    pub use super::error::{Backpressure, PicklebackError};
     pub use super::message::MessageId;
     pub use super::received_message::ReceivedMessage;
-    pub use super::tracking::PacketeerStats;
-    pub use super::Packeteer;
+    pub use super::tracking::PicklebackStats;
+    pub use super::Pickleback;
 }
 
 /// Things needed for integration tests
@@ -68,12 +68,12 @@ pub(crate) struct PacketId(pub(crate) u16);
 /// every N packets, we recaluclate packet loss. N is:
 const PACKET_LOSS_RECALCULATE_INTERVAL: u16 = 100;
 
-/// An instance of Packeteer represents one of the two endpoints at either side of a link
-pub struct Packeteer {
+/// An instance of Pickleback represents one of the two endpoints at either side of a link
+pub struct Pickleback {
     time: f64,
     rtt: f32,
     packet_loss: f32,
-    config: PacketeerConfig,
+    config: PicklebackConfig,
     sequence_id: u16,
     newest_ack: Option<u16>,
     /// We know we've successfully acked up to this point, so when constructing the ack field in
@@ -83,26 +83,26 @@ pub struct Packeteer {
     channels: ChannelList,
     sent_buffer: SequenceBuffer<SentMeta>,
     received_buffer: SequenceBuffer<ReceivedMeta>,
-    stats: PacketeerStats,
+    stats: PicklebackStats,
     outbox: VecDeque<BufHandle>,
     pool: BufPool,
     xor_salt: Option<u64>,
 }
 
-impl Default for Packeteer {
+impl Default for Pickleback {
     fn default() -> Self {
-        Self::new(PacketeerConfig::default(), 1.0)
+        Self::new(PicklebackConfig::default(), 1.0)
     }
 }
 
 /// Represents one end of a datagram stream between two peers, one of which is the server.
 ///
-impl Packeteer {
-    /// Create new Packeteer instance.
+impl Pickleback {
+    /// Create new Pickleback instance.
     ///
     /// `time` should probably match your game loop time, which might be the number of seconds
     /// since the game started. You'll be updating this with a `dt` every tick, via `update()`.
-    pub fn new(config: PacketeerConfig, time: f64) -> Self {
+    pub fn new(config: PicklebackConfig, time: f64) -> Self {
         let mut channels = ChannelList::default();
         channels.insert(Channel::from(UnreliableChannel::new(0, time)));
         channels.insert(Channel::from(ReliableChannel::new(1, time)));
@@ -122,7 +122,7 @@ impl Packeteer {
             sent_buffer: SequenceBuffer::with_capacity(config.sent_packets_buffer_size),
             received_buffer: SequenceBuffer::with_capacity(config.received_packets_buffer_size),
             dispatcher: MessageDispatcher::new(&config),
-            stats: PacketeerStats::default(),
+            stats: PicklebackStats::default(),
             outbox: VecDeque::new(),
             channels,
             pool,
@@ -134,9 +134,9 @@ impl Packeteer {
         self.xor_salt = xor_salt;
     }
 
-    /// Returns `PacketeerStats`, which tracks metrics on packet and message counts, etc.
+    /// Returns `PicklebackStats`, which tracks metrics on packet and message counts, etc.
     #[allow(unused)]
-    pub fn stats(&self) -> &PacketeerStats {
+    pub fn stats(&self) -> &PicklebackStats {
         &self.stats
     }
 
@@ -154,7 +154,7 @@ impl Packeteer {
 
     /// Draining iterator over packets in the outbox that we need to send over the network.
     ///
-    /// Call this and send packets to the other Packeteer endpoint via a network transport.
+    /// Call this and send packets to the other Pickleback endpoint via a network transport.
     ///
     /// # Panics
     ///
@@ -163,7 +163,7 @@ impl Packeteer {
     pub fn drain_packets_to_send(&mut self) -> std::collections::vec_deque::Drain<'_, BufHandle> {
         match self.write_packets_to_send() {
             Ok(()) => self.outbox.drain(..),
-            Err(PacketeerError::Backpressure(bp)) => {
+            Err(PicklebackError::Backpressure(bp)) => {
                 // Might have written some packets, but not all.
                 // still want to return the iterator.
                 // TODO This should be a reportable non-fatal condition of some sort.
@@ -195,16 +195,16 @@ impl Packeteer {
     ///
     /// # Errors
     ///
-    /// * PacketeerError::PayloadTooBig - if `message_payload` size exceeds config.max_message_size
-    /// * PacketeerError::Backpressure(_) - can't send for some reason
-    /// * PacketeerError::NoSuchChannel - you provided an invalid channel
+    /// * PicklebackError::PayloadTooBig - if `message_payload` size exceeds config.max_message_size
+    /// * PicklebackError::Backpressure(_) - can't send for some reason
+    /// * PicklebackError::NoSuchChannel - you provided an invalid channel
     pub fn send_message(
         &mut self,
         channel: u8,
         message_payload: &[u8],
-    ) -> Result<MessageId, PacketeerError> {
+    ) -> Result<MessageId, PicklebackError> {
         if message_payload.len() > self.config.max_message_size {
-            return Err(PacketeerError::PayloadTooBig);
+            return Err(PicklebackError::PayloadTooBig);
         }
         // calling send_message doesn't generate packets or update the sent_unacked_packets count,
         // but perhaps last tick sent enough packets that this condition exists now, and if so, we
@@ -212,11 +212,11 @@ impl Packeteer {
         // but for now it suits the tests to reject here:
         if self.sent_unacked_packets() >= MAX_UNACKED_PACKETS {
             warn!("Can't sent, too many pending");
-            return Err(PacketeerError::Backpressure(Backpressure::TooManyPending));
+            return Err(PicklebackError::Backpressure(Backpressure::TooManyPending));
         }
         self.stats.message_sends += 1;
         let Some(channel) = self.channels.get_mut(channel) else {
-            return Err(PacketeerError::NoSuchChannel);
+            return Err(PicklebackError::NoSuchChannel);
         };
         self.dispatcher
             .add_message_to_channel(&self.pool, channel, message_payload)
@@ -248,14 +248,14 @@ impl Packeteer {
     fn next_packet_header(
         &mut self,
         packet_type: PacketType,
-    ) -> Result<ProtocolPacketHeader, PacketeerError> {
+    ) -> Result<ProtocolPacketHeader, PicklebackError> {
         self.sequence_id = self.sequence_id.wrapping_add(1);
         let id = PacketId(self.sequence_id);
         let num_acks_required = self.received_unacked_packets();
         info!("Num acks required in packet id {id:?} = {num_acks_required}");
         if num_acks_required > MAX_UNACKED_PACKETS {
             warn!("Not composing packet, backpressure.");
-            return Err(PacketeerError::Backpressure(Backpressure::TooManyPending));
+            return Err(PicklebackError::Backpressure(Backpressure::TooManyPending));
         }
 
         let ack_iter = AckIter::with_minimum_length(&self.received_buffer, num_acks_required);
@@ -272,7 +272,7 @@ impl Packeteer {
     }
 
     /// Calls `next_packet_header()` and writes it to the provided cursor, returning the bytes written
-    fn write_packet_header(&mut self, cursor: &mut impl Write) -> Result<usize, PacketeerError> {
+    fn write_packet_header(&mut self, cursor: &mut impl Write) -> Result<usize, PicklebackError> {
         let header = self.next_packet_header(PacketType::Messages)?;
         debug!(
             ">>> Sending packet id:{:?} ack_id:{:?}",
@@ -292,9 +292,9 @@ impl Packeteer {
     ///
     /// A "packet" is a buffer sized at the max_packet_size, which is approx. 1200 bytes.
     /// name: compose_packets?
-    fn write_packets_to_send(&mut self) -> Result<(), PacketeerError> {
+    fn write_packets_to_send(&mut self) -> Result<(), PicklebackError> {
         if self.sent_unacked_packets() >= MAX_UNACKED_PACKETS {
-            return Err(PacketeerError::Backpressure(Backpressure::TooManyPending));
+            return Err(PicklebackError::Backpressure(Backpressure::TooManyPending));
         }
 
         let mut sent_something = false;
@@ -310,7 +310,7 @@ impl Packeteer {
                 // before we allocate a new packet, ensure we aren't going to break the ack system
                 // by having too many unacked packets in-flight.
                 if self.sent_unacked_packets() >= MAX_UNACKED_PACKETS {
-                    return Err(PacketeerError::Backpressure(Backpressure::TooManyPending));
+                    return Err(PicklebackError::Backpressure(Backpressure::TooManyPending));
                 }
                 packet = Some(self.pool.get_buffer(max_packet_size));
                 let cur = Cursor::new(packet.as_mut().unwrap().as_mut());
@@ -361,7 +361,7 @@ impl Packeteer {
         channel: &mut Channel,
         cursor: &mut BufferLimitedWriter,
         message_handles: &mut Vec<MessageHandle>,
-    ) -> Result<usize, PacketeerError> {
+    ) -> Result<usize, PicklebackError> {
         let mut num_written = 0;
         while let Some(msg) = channel.get_message_to_write_to_a_packet(cursor.remaining()) {
             num_written += 1;
@@ -382,9 +382,9 @@ impl Packeteer {
     ///
     /// The packet  header contains the ack field, so it can be useful to send an empty packet
     /// just to send acks. We do this if there are no messages to send this tick.
-    fn send_empty_packet(&mut self) -> Result<(), PacketeerError> {
+    fn send_empty_packet(&mut self) -> Result<(), PicklebackError> {
         if self.sent_unacked_packets() >= MAX_UNACKED_PACKETS {
-            return Err(PacketeerError::Backpressure(Backpressure::TooManyPending));
+            return Err(PicklebackError::Backpressure(Backpressure::TooManyPending));
         }
         let mut packet = Some(self.pool.get_buffer(1300));
         let mut cursor = Cursor::new(packet.as_mut().unwrap().as_mut());
@@ -398,7 +398,7 @@ impl Packeteer {
     /// The BufHandle is for a packet with headers written, usually in `write_packets_to_send()`.
     ///
     /// The consumer code should fetch and dispatch it via whatever means they like.
-    fn send_packet(&mut self, packet: BufHandle) -> Result<(), PacketeerError> {
+    fn send_packet(&mut self, packet: BufHandle) -> Result<(), PicklebackError> {
         let send_size = packet.len() + self.config.packet_header_size;
         // received_buffer.sequence() is the most recent packet ack we're acknowledging reciept of in the
         // header of this packet we're about to send.
@@ -421,7 +421,7 @@ impl Packeteer {
 
     /// Advance the time by `dt` seconds.
     ///
-    /// When ticking in your game loop, you must advance the time within Packeteer too, by passing
+    /// When ticking in your game loop, you must advance the time within Pickleback too, by passing
     /// in the delta time since you last called update.
     ///
     /// This is so it knows when to schedule re-sends of data, and can calculate rtt correctly.
@@ -441,14 +441,14 @@ impl Packeteer {
     ///
     /// # Errors
     ///
-    /// * Can return a PacketeerError::Io if parsing packet headers or messages fails.
-    /// * Can return PacketeerError::StalePacket
-    /// * Can return PacketeerError::DuplicatePacket
+    /// * Can return a PicklebackError::Io if parsing packet headers or messages fails.
+    /// * Can return PicklebackError::StalePacket
+    /// * Can return PicklebackError::DuplicatePacket
     pub(crate) fn process_incoming_packet_payload(
         &mut self,
         header: &ProtocolPacketHeader,
         payload_reader: &mut Cursor<&[u8]>,
-    ) -> Result<(), PacketeerError> {
+    ) -> Result<(), PicklebackError> {
         self.stats.packets_received += 1;
         log::trace!(
             "<<< Receiving packet id:{:?} ack_id:{:?}",
@@ -459,7 +459,7 @@ impl Packeteer {
         if !self.received_buffer.check_sequence(header.id().0) {
             log::debug!("Ignoring stale packet: {}", header.id().0);
             self.stats.packets_stale += 1;
-            return Err(PacketeerError::StalePacket);
+            return Err(PicklebackError::StalePacket);
         }
 
         // TODO we can only reject older sequence numbers for unreliable unfragmented messages atm
@@ -467,14 +467,14 @@ impl Packeteer {
         if !self.received_buffer.check_newer_than_current(header.id().0) {
             // log::debug!("Ignoring stale packet: {}", header.id().0);
             // self.stats.packets_stale += 1;
-            // return Err(PacketeerError::StalePacket);
+            // return Err(PicklebackError::StalePacket);
         }
 
         // if this packet was already received, reject as duplicate
         if self.received_buffer.exists(header.id().0) {
             log::debug!("Ignoring duplicate packet: {:?}", header.id());
             self.stats.packets_duplicate += 1;
-            return Err(PacketeerError::DuplicatePacket);
+            return Err(PicklebackError::DuplicatePacket);
         }
         let packet_len = header.size() + payload_reader.remaining() as usize;
         self.received_buffer.insert(
@@ -505,15 +505,15 @@ impl Packeteer {
     ///
     /// # Errors
     ///
-    /// * Can return a PacketeerError::Io if parsing packet headers or messages fails.
-    /// * Can return PacketeerError::StalePacket
-    /// * Can return PacketeerError::DuplicatePacket
+    /// * Can return a PicklebackError::Io if parsing packet headers or messages fails.
+    /// * Can return PicklebackError::StalePacket
+    /// * Can return PicklebackError::DuplicatePacket
     /*
     pub(crate) fn process_incoming_packet(
         &mut self,
         packet_len: usize,
         msg_packet: MessagesPacket,
-    ) -> Result<(), PacketeerError> {
+    ) -> Result<(), PicklebackError> {
         self.stats.packets_received += 1;
         let header = &msg_packet.header;
         log::trace!(
@@ -525,7 +525,7 @@ impl Packeteer {
         if !self.received_buffer.check_sequence(header.id().0) {
             log::debug!("Ignoring stale packet: {}", header.id().0);
             self.stats.packets_stale += 1;
-            return Err(PacketeerError::StalePacket);
+            return Err(PicklebackError::StalePacket);
         }
 
         // TODO we can only reject older sequence numbers for unreliable unfragmented messages atm
@@ -533,14 +533,14 @@ impl Packeteer {
         if !self.received_buffer.check_newer_than_current(header.id().0) {
             // log::debug!("Ignoring stale packet: {}", header.id().0);
             // self.stats.packets_stale += 1;
-            // return Err(PacketeerError::StalePacket);
+            // return Err(PicklebackError::StalePacket);
         }
 
         // if this packet was already received, reject as duplicate
         if self.received_buffer.exists(header.id().0) {
             log::debug!("Ignoring duplicate packet: {:?}", header.id());
             self.stats.packets_duplicate += 1;
-            return Err(PacketeerError::DuplicatePacket);
+            return Err(PicklebackError::DuplicatePacket);
         }
         self.received_buffer.insert(
             header.id().0,
@@ -569,7 +569,7 @@ impl Packeteer {
     // fn process_packet_messages(
     //     &mut self,
     //     messages: &mut impl Iterator<Item = Message>,
-    // ) -> Result<(), PacketeerError> {
+    // ) -> Result<(), PicklebackError> {
     //     while let Some(msg) = messages.next() {
     //         // for msg in messages {
     //         self.stats.messages_received += 1;
@@ -687,7 +687,7 @@ impl Packeteer {
 
     /// Returns the config you passed into `new()`
     #[allow(unused)]
-    pub fn config(&self) -> &PacketeerConfig {
+    pub fn config(&self) -> &PicklebackConfig {
         &self.config
     }
 
@@ -711,8 +711,8 @@ mod tests {
     fn drop_duplicate_packets() {
         init_logger();
 
-        let mut server = Packeteer::default();
-        let mut client = Packeteer::default();
+        let mut server = Pickleback::default();
+        let mut client = Pickleback::default();
         client.set_xor_salt(Some(0));
         server.set_xor_salt(Some(0));
         let payload = b"hello";
@@ -747,7 +747,7 @@ mod tests {
             panic!("err");
         };
         match client.process_incoming_packet_payload(&header, &mut cur) {
-            Err(PacketeerError::DuplicatePacket) => {}
+            Err(PicklebackError::DuplicatePacket) => {}
             e => {
                 panic!("Should be dupe packet error, got: {:?}", e);
             }
@@ -757,8 +757,8 @@ mod tests {
     #[test]
     fn many_packets_in_flight() {
         crate::test_utils::init_logger();
-        let mut server = Packeteer::default();
-        let mut client = Packeteer::default();
+        let mut server = Pickleback::default();
+        let mut client = Pickleback::default();
         client.set_xor_salt(Some(0));
         server.set_xor_salt(Some(0));
         let msg = &[0x42_u8; 1024];
@@ -786,7 +786,7 @@ mod tests {
         info!("sent_unacked is now: {}", server.sent_unacked_packets());
         info!("Send attempt for MAX_UNACKED_PACKETS+1");
         match server.send_message(0, msg) {
-            Err(PacketeerError::Backpressure(Backpressure::TooManyPending)) => {}
+            Err(PicklebackError::Backpressure(Backpressure::TooManyPending)) => {}
             other => panic!("Expecting backpressure, got {other:?}"),
         }
 
@@ -818,8 +818,8 @@ mod tests {
 
         let test_data = &[0x41; 24]; // "AAA..."
 
-        let mut server = Packeteer::default();
-        let mut client = Packeteer::default();
+        let mut server = Pickleback::default();
+        let mut client = Pickleback::default();
         client.set_xor_salt(Some(0));
         server.set_xor_salt(Some(0));
 

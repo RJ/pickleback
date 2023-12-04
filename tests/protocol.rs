@@ -1,11 +1,11 @@
-extern crate packeteer;
+extern crate pickleback;
 // use std::collections::HashMap;
 // use std::collections::HashSet;
 // use std::collections::VecDeque;
 
 // use log::*;
-// use packeteer::prelude::*;
-use packeteer::testing::*;
+// use pickleback::prelude::*;
+use pickleback::testing::*;
 
 #[test]
 fn protocol() {

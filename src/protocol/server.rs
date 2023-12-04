@@ -1,8 +1,8 @@
 use super::*;
 use crate::{
     buffer_pool::BufPool,
-    prelude::{PacketeerConfig, PacketeerError},
-    PacketId, Packeteer,
+    prelude::{PicklebackConfig, PicklebackError},
+    PacketId, Pickleback,
 };
 use std::{collections::VecDeque, io::Cursor, iter::empty, net::SocketAddr};
 
@@ -15,7 +15,7 @@ pub(crate) struct PendingClient {
     // time we first sent challenge response
     last_challenged_at: f64,
     socket_addr: SocketAddr,
-    packeteer: Packeteer,
+    pickleback: Pickleback,
 }
 
 impl std::fmt::Debug for PendingClient {
@@ -39,7 +39,7 @@ pub(crate) struct ConnectedClient {
     /// time we last sent a packet to this client
     last_sent_time: f64,
     /// endpoint for messages
-    packeteer: Packeteer,
+    pickleback: Pickleback,
 }
 
 impl std::fmt::Debug for ConnectedClient {
@@ -52,7 +52,7 @@ impl std::fmt::Debug for ConnectedClient {
     }
 }
 
-// this should hold the packeteer instance?
+// this should hold the pickleback instance?
 pub struct ProtocolServer {
     pub(crate) time: f64,
     pending_clients: Vec<PendingClient>,
@@ -71,7 +71,7 @@ impl ProtocolServer {
             pool: BufPool::default(),
         }
     }
-    pub fn update(&mut self, dt: f64) -> Result<(), PacketeerError> {
+    pub fn update(&mut self, dt: f64) -> Result<(), PicklebackError> {
         self.time += dt;
         self.compose_packets()?;
         Ok(())
@@ -83,7 +83,7 @@ impl ProtocolServer {
         self.outbox.drain(..)
     }
 
-    fn compose_packets(&mut self) -> Result<(), PacketeerError> {
+    fn compose_packets(&mut self) -> Result<(), PicklebackError> {
         let mut to_remove = Vec::new();
 
         // Run state-machine for pending clients:
@@ -98,7 +98,7 @@ impl ProtocolServer {
                 pc.last_challenged_at = self.time;
                 let packet = ProtocolPacket::ConnectionChallenge(ConnectionChallengePacket {
                     header: pc
-                        .packeteer
+                        .pickleback
                         .next_packet_header(PacketType::ConnectionChallenge)?,
                     client_salt: pc.client_salt,
                     server_salt: pc.server_salt,
@@ -127,14 +127,14 @@ impl ProtocolServer {
             let cc = self.connected_clients.remove(i);
             log::info!("Timed out client: {cc:?}");
         }
-        // for connected clients, we send any messages that the packeteer layer wants
+        // for connected clients, we send any messages that the pickleback layer wants
         for cc in self.connected_clients.iter_mut() {
             let pre_len = self.outbox.len();
             // * until confirmed, send a KA before messages packets
             // * if nothing sent for a while, send a KA
             if !cc.confirmed || self.time - cc.last_sent_time > 0.1 {
                 let keepalive = ProtocolPacket::KeepAlive(KeepAlivePacket {
-                    header: cc.packeteer.next_packet_header(PacketType::KeepAlive)?,
+                    header: cc.pickleback.next_packet_header(PacketType::KeepAlive)?,
                     xor_salt: cc.xor_salt,
                     client_index: cc.client_index.unwrap_or_default(), // TODO
                 });
@@ -145,7 +145,7 @@ impl ProtocolServer {
             }
             self.outbox
                 .extend(
-                    cc.packeteer
+                    cc.pickleback
                         .drain_packets_to_send()
                         .map(|packet| AddressedPacket {
                             address: cc.socket_addr,
@@ -154,10 +154,10 @@ impl ProtocolServer {
                 );
             if self.outbox.len() != pre_len {
                 cc.last_sent_time = self.time;
-                // } else if cc.packeteer.received_unacked_packets() > 0 {
+                // } else if cc.pickleback.received_unacked_packets() > 0 {
                 //     // still have acks to deliver? send a ka packet just for acks.
                 //     let keepalive = ProtocolPacket::KeepAlive(KeepAlivePacket {
-                //         header: cc.packeteer.next_packet_header(PacketType::KeepAlive)?,
+                //         header: cc.pickleback.next_packet_header(PacketType::KeepAlive)?,
                 //         xor_salt: cc.xor_salt,
                 //         client_index: cc.client_index.unwrap_or_default(), // TODO
                 //     });
@@ -231,7 +231,7 @@ impl ProtocolServer {
         &mut self,
         packet: &[u8],
         client_addr: SocketAddr,
-    ) -> Result<(), PacketeerError> {
+    ) -> Result<(), PicklebackError> {
         let mut cur = Cursor::new(packet);
         let packet = read_packet(&mut cur)?;
         log::info!("server got >>> {packet:?}");
@@ -271,7 +271,7 @@ impl ProtocolServer {
                         last_challenged_at: 0.0,
                         socket_addr: client_addr,
                         first_requested_time: self.time,
-                        packeteer: Packeteer::new(PacketeerConfig::default(), self.time),
+                        pickleback: Pickleback::new(PicklebackConfig::default(), self.time),
                     })
                 }
             }
@@ -281,8 +281,8 @@ impl ProtocolServer {
             }) => {
                 // there should be a pending client when we get a challenge response
                 if let Some(pending) = self.take_pending_by_xor_salt(xor_salt, client_addr) {
-                    let mut packeteer = pending.packeteer;
-                    packeteer.xor_salt = Some(xor_salt);
+                    let mut pickleback = pending.pickleback;
+                    pickleback.xor_salt = Some(xor_salt);
                     let mut cc = ConnectedClient {
                         confirmed: false,
                         client_index: None,
@@ -290,11 +290,11 @@ impl ProtocolServer {
                         last_received_time: self.time,
                         last_sent_time: self.time,
                         socket_addr: client_addr,
-                        packeteer,
+                        pickleback,
                     };
                     // send KA
                     let ka = ProtocolPacket::KeepAlive(KeepAlivePacket {
-                        header: cc.packeteer.next_packet_header(PacketType::KeepAlive)?,
+                        header: cc.pickleback.next_packet_header(PacketType::KeepAlive)?,
                         xor_salt: cc.xor_salt,
                         client_index: 0,
                     });
@@ -344,7 +344,7 @@ impl ProtocolServer {
                         cc.confirmed = true;
                     }
                     cc.last_received_time = time;
-                    cc.packeteer.process_packet_acks_and_rtt(&header);
+                    cc.pickleback.process_packet_acks_and_rtt(&header);
                 } else {
                     log::warn!("Discarding KA packet, no session");
                 }
@@ -358,7 +358,7 @@ impl ProtocolServer {
                         cc.confirmed = true;
                     }
                     // this will consume the remaining cursor and parse out the messages
-                    cc.packeteer
+                    cc.pickleback
                         .process_incoming_packet_payload(&mp.header, &mut cur)?;
                 } else {
                     log::warn!(
