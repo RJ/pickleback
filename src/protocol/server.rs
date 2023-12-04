@@ -124,7 +124,6 @@ impl ProtocolServer {
             if self.time - cc.last_received_time > 5. {
                 to_remove.push(i);
             }
-            // TODO send KA if nothing else sent in a while
         }
         for i in to_remove {
             let cc = self.connected_clients.remove(i);
@@ -132,8 +131,10 @@ impl ProtocolServer {
         }
         // for connected clients, we send any messages that the packeteer layer wants
         for cc in self.connected_clients.iter_mut() {
-            // until confirmed, send a KA before messages packets
-            if !cc.confirmed {
+            let pre_len = self.outbox.len();
+            // * until confirmed, send a KA before messages packets
+            // * if nothing sent for a while, send a KA
+            if !cc.confirmed || self.time - cc.last_sent_time > 0.1 {
                 let keepalive = ProtocolPacket::KeepAlive(KeepAlivePacket {
                     header: cc.packeteer.next_packet_header(PacketType::KeepAlive)?,
                     client_index: 0,
@@ -143,29 +144,21 @@ impl ProtocolServer {
                     packet: write_packet(&self.pool, keepalive)?,
                 });
             }
-            self.outbox.extend(
-                cc.packeteer
-                    .drain_packets_to_send()
-                    .map(|packet| AddressedPacket {
-                        address: cc.socket_addr,
-                        packet,
-                    }),
-            )
+            self.outbox
+                .extend(
+                    cc.packeteer
+                        .drain_packets_to_send()
+                        .map(|packet| AddressedPacket {
+                            address: cc.socket_addr,
+                            packet,
+                        }),
+                );
+            if self.outbox.len() != pre_len {
+                cc.last_sent_time = self.time;
+            }
         }
         Ok(())
     }
-
-    // fn send_keepalive(&mut self, cc: &mut ConnectedClient) -> Result<(), PacketeerError> {
-    //     let keepalive = ProtocolPacket::KeepAlive(KeepAlivePacket {
-    //         header: cc.packeteer.next_packet_header(PacketType::KeepAlive)?,
-    //         client_index: 0,
-    //     });
-    //     self.outbox.push_back(AddressedPacket {
-    //         address: cc.socket_addr,
-    //         packet: write_packet(&self.pool, keepalive)?,
-    //     });
-    //     Ok(())
-    // }
 
     fn get_pending_by_client_salt(
         &mut self,
@@ -276,11 +269,7 @@ impl ProtocolServer {
             ProtocolPacket::ConnectionChallengeResponse(ConnectionChallengeResponsePacket {
                 header,
             }) if header.xor_salt.is_some() => {
-                // if pending, set 'em up.
-                // if already connected from our POV, they may not have got the message yet?
-                //
-                // we should probablt send a welcome packet, and always send a welcome when talking
-                // to a CC if we have yet to receive a message from them while in the connected state?
+                // there should be a pending client when we get a challenge response
                 if let Some(pending) =
                     self.take_pending_by_xor_salt(header.xor_salt.unwrap(), client_addr)
                 {

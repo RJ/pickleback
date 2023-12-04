@@ -29,9 +29,9 @@ pub(crate) enum ProtocolPacket {
     ConnectionDenied(ConnectionDeniedPacket),
     // 5 - Any
     Messages(MessagesPacket),
-    // 6 - Any (server can kick you)
+    // 6 - Any (server can kick you, or you can gracefully exit)
     Disconnect(DisconnectPacket),
-    // 7 - Keepalive
+    // 7 - Any
     KeepAlive(KeepAlivePacket),
 }
 
@@ -99,7 +99,6 @@ impl ProtocolPacketHeader {
         if num_acks == 0 {
             return Self::new_no_acks(id, packet_type, xor_salt);
         }
-        // assert!(num_acks > 0, "num acks required must be > 0");
         let ack_header = AckHeader::from_ack_iter(num_acks, ack_iter)?;
         Ok(Self {
             packet_type,
@@ -154,8 +153,10 @@ impl ProtocolPacketHeader {
         // packet types that have the xor_salt:
         // 3 = ConnectionChallengeResponse
         // 5 = Messages
-        // 6 Disconnect
-        // but just writing zeros if absent anyway, for convenience
+        // 6 = Disconnect
+        // 7 = KeepAlive
+        // just writing zeros if absent anyway, for convenience.
+        // only low-volume messages don't need the xor salt, so it's not really wasting bandwidth.
         writer.write_u64::<NetworkEndian>(self.xor_salt.unwrap_or(0))?;
 
         if let Some(ack_header) = self.ack_header {
@@ -255,7 +256,6 @@ pub(crate) fn write_packet(
     let mut buffer = pool.get_buffer(max_packet_size);
     let mut writer = BufferLimitedWriter::new(Cursor::new(&mut buffer), max_packet_size);
 
-    // packet-specific writing
     match packet {
         ProtocolPacket::KeepAlive(KeepAlivePacket {
             header,
