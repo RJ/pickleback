@@ -2,7 +2,7 @@ use crate::{ack_header::AckHeader, PacketId, PacketeerError};
 use byteorder::{NetworkEndian, ReadBytesExt, WriteBytesExt};
 use log::*;
 use std::io::{Cursor, Write};
-
+/*
 #[derive(Debug)]
 pub struct PacketHeader {
     id: PacketId,
@@ -80,3 +80,4 @@ impl PacketHeader {
         Ok(Self { id, ack_header })
     }
 }
+*/

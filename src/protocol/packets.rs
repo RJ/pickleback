@@ -7,18 +7,18 @@ use crate::{
 };
 use byteorder::*;
 use std::{
-    io::{Cursor, Read, Write},
+    io::{Cursor, Write},
     net::SocketAddr,
 };
 
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct AddressedPacket {
     pub address: SocketAddr,
     pub packet: BufHandle,
 }
 
 #[derive(Debug)]
-pub(crate) enum ProtocolPacket<'a> {
+pub(crate) enum ProtocolPacket {
     // 1 - C2S
     ConnectionRequest(ConnectionRequestPacket),
     // 2 - S2C
@@ -28,9 +28,11 @@ pub(crate) enum ProtocolPacket<'a> {
     // 4 - S2C
     ConnectionDenied(ConnectionDeniedPacket),
     // 5 - Any
-    Messages(MessagesPacket<'a>),
+    Messages(MessagesPacket),
     // 6 - Any (server can kick you)
     Disconnect(DisconnectPacket),
+    // 7 - Keepalive
+    KeepAlive(KeepAlivePacket),
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -42,6 +44,7 @@ pub(crate) enum PacketType {
     ConnectionDenied = 4,
     Messages = 5,
     Disconnect = 6,
+    KeepAlive = 7,
 }
 
 impl TryFrom<u8> for PacketType {
@@ -55,14 +58,15 @@ impl TryFrom<u8> for PacketType {
             4 => Ok(PacketType::ConnectionDenied),
             5 => Ok(PacketType::Messages),
             6 => Ok(PacketType::Disconnect),
+            7 => Ok(PacketType::KeepAlive),
             _ => Err(PacketeerError::InvalidPacket),
         }
     }
 }
 
-impl<'a> Into<PacketType> for &ProtocolPacket<'_> {
-    fn into(self) -> PacketType {
-        match self {
+impl From<&ProtocolPacket> for PacketType {
+    fn from(val: &ProtocolPacket) -> Self {
+        match val {
             ProtocolPacket::ConnectionRequest(_) => PacketType::ConnectionRequest,
             ProtocolPacket::ConnectionChallenge(_) => PacketType::ConnectionChallenge,
             ProtocolPacket::ConnectionChallengeResponse(_) => {
@@ -71,6 +75,7 @@ impl<'a> Into<PacketType> for &ProtocolPacket<'_> {
             ProtocolPacket::ConnectionDenied(_) => PacketType::ConnectionDenied,
             ProtocolPacket::Messages(_) => PacketType::Messages,
             ProtocolPacket::Disconnect(_) => PacketType::Disconnect,
+            ProtocolPacket::KeepAlive(_) => PacketType::KeepAlive,
         }
     }
 }
@@ -91,12 +96,27 @@ impl ProtocolPacketHeader {
         packet_type: PacketType,
         xor_salt: Option<u64>,
     ) -> Result<Self, PacketeerError> {
-        assert!(num_acks > 0, "num acks required must be > 0");
+        if num_acks == 0 {
+            return Self::new_no_acks(id, packet_type, xor_salt);
+        }
+        // assert!(num_acks > 0, "num acks required must be > 0");
         let ack_header = AckHeader::from_ack_iter(num_acks, ack_iter)?;
         Ok(Self {
             packet_type,
             id,
             ack_header: Some(ack_header),
+            xor_salt,
+        })
+    }
+    pub(crate) fn new_no_acks(
+        id: PacketId,
+        packet_type: PacketType,
+        xor_salt: Option<u64>,
+    ) -> Result<Self, PacketeerError> {
+        Ok(Self {
+            packet_type,
+            id,
+            ack_header: None,
             xor_salt,
         })
     }
@@ -198,12 +218,12 @@ pub(crate) struct ConnectionDeniedPacket {
 }
 
 // Bidirectional
-pub(crate) struct MessagesPacket<'a> {
+pub(crate) struct MessagesPacket {
     pub(crate) header: ProtocolPacketHeader,
-    pub(crate) messages: Box<dyn Iterator<Item = Result<Message, PacketeerError>> + 'a>, //Vec<Message>,
+    pub(crate) messages: Vec<Message>, // Box<dyn Iterator<Item = Result<Message, PacketeerError>> + 'a>, //Vec<Message>,
 }
 
-impl<'a> std::fmt::Debug for MessagesPacket<'_> {
+impl std::fmt::Debug for MessagesPacket {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "MessagesPacket[header: {:?}]]", self.header)
     }
@@ -213,6 +233,13 @@ impl<'a> std::fmt::Debug for MessagesPacket<'_> {
 #[derive(Debug)]
 pub(crate) struct DisconnectPacket {
     pub(crate) header: ProtocolPacketHeader,
+}
+
+// Bi?
+#[derive(Debug)]
+pub(crate) struct KeepAlivePacket {
+    pub(crate) header: ProtocolPacketHeader,
+    pub(crate) client_index: u32,
 }
 
 fn write_zero_bytes<W: Write>(writer: &mut W, num_bytes: usize) -> std::io::Result<()> {
@@ -230,6 +257,13 @@ pub(crate) fn write_packet(
 
     // packet-specific writing
     match packet {
+        ProtocolPacket::KeepAlive(KeepAlivePacket {
+            header,
+            client_index,
+        }) => {
+            header.write(&mut writer)?;
+            writer.write_u32::<NetworkEndian>(client_index)?;
+        }
         ProtocolPacket::ConnectionRequest(ConnectionRequestPacket {
             header,
             client_salt,
@@ -261,15 +295,13 @@ pub(crate) fn write_packet(
             header.write(&mut writer)?;
             writer.write_u8(reason)?;
         }
-        ProtocolPacket::Messages(MessagesPacket {
-            header,
-            mut messages,
-        }) => {
-            assert!(header.xor_salt.is_some());
-            header.write(&mut writer)?;
-            while let Some(msg) = messages.next() {
-                writer.write_all(msg?.as_slice())?;
-            }
+        ProtocolPacket::Messages(MessagesPacket { .. }) => {
+            panic!("written elsewhere");
+            // assert!(header.xor_salt.is_some());
+            // header.write(&mut writer)?;
+            // while let Some(msg) = messages.next() {
+            //     writer.write_all(msg?.as_slice())?;
+            // }
         }
         ProtocolPacket::Disconnect(DisconnectPacket { header }) => {
             assert!(header.xor_salt.is_some());
@@ -279,12 +311,19 @@ pub(crate) fn write_packet(
     Ok(buffer)
 }
 
-pub(crate) fn read_packet<'a>(
-    reader: &'a mut Cursor<&'a [u8]>,
-    pool: &'a BufPool,
-) -> Result<ProtocolPacket<'a>, PacketeerError> {
+pub(crate) fn read_packet(
+    reader: &mut Cursor<&[u8]>,
+    pool: &BufPool,
+) -> Result<ProtocolPacket, PacketeerError> {
     let header = ProtocolPacketHeader::parse(reader)?;
     match header.packet_type {
+        PacketType::KeepAlive => {
+            let c = KeepAlivePacket {
+                header,
+                client_index: reader.read_u32::<NetworkEndian>()?,
+            };
+            Ok(ProtocolPacket::KeepAlive(c))
+        }
         PacketType::ConnectionRequest => {
             let c = ConnectionRequestPacket {
                 header,
@@ -325,19 +364,12 @@ pub(crate) fn read_packet<'a>(
             Ok(ProtocolPacket::ConnectionDenied(c))
         }
         PacketType::Messages => {
-            let msg_iter = MessageIterator { reader, pool };
-
-            // let mut messages = Vec::new();
-            // while reader.remaining() > 0 {
-            //     // as long as there are bytes left to read, we should only find whole messages
-            //     messages.push(Message::parse(pool, reader)?);
-            // }
-            // // TODO this could potentially be a message iter and bypass allocating the vec?
-            let c = MessagesPacket {
-                header,
-                messages: Box::new(msg_iter),
-            };
-            // payload remains unread by cursor, caller will do that
+            let mut messages = Vec::new();
+            while reader.remaining() > 0 {
+                // as long as there are bytes left to read, we should only find whole messages
+                messages.push(Message::parse(pool, reader)?);
+            }
+            let c = MessagesPacket { header, messages };
             Ok(ProtocolPacket::Messages(c))
         }
         PacketType::Disconnect => {
@@ -347,19 +379,19 @@ pub(crate) fn read_packet<'a>(
     }
 }
 
-struct MessageIterator<'a> {
-    reader: &'a mut Cursor<&'a [u8]>,
-    pool: &'a BufPool,
-}
+// struct MessageIterator<'a> {
+//     reader: &'a mut Cursor<&'a [u8]>,
+//     pool: &'a BufPool,
+// }
 
-impl<'a> Iterator for MessageIterator<'a> {
-    type Item = Result<Message, PacketeerError>;
+// impl<'a> Iterator for MessageIterator<'a> {
+//     type Item = Result<Message, PacketeerError>;
 
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.reader.remaining() > 0 {
-            Some(Message::parse(self.pool, self.reader))
-        } else {
-            None
-        }
-    }
-}
+//     fn next(&mut self) -> Option<Self::Item> {
+//         if self.reader.remaining() > 0 {
+//             Some(Message::parse(self.pool, self.reader))
+//         } else {
+//             None
+//         }
+//     }
+// }

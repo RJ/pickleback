@@ -34,6 +34,8 @@ pub(crate) struct ConnectedClient {
     server_salt: u64,
     xor_salt: u64,
     socket_addr: SocketAddr,
+    confirmed: bool,
+    client_index: Option<u32>,
     /// time we last received a packet from client
     last_received_time: f64,
     /// time we last sent a packet to this client
@@ -53,25 +55,25 @@ impl std::fmt::Debug for ConnectedClient {
 }
 
 // this should hold the packeteer instance?
-pub(crate) struct ProtocolServer<'a> {
-    time: f64,
+pub struct ProtocolServer {
+    pub(crate) time: f64,
     pending_clients: Vec<PendingClient>,
     connected_clients: Vec<ConnectedClient>,
     outbox: VecDeque<AddressedPacket>,
-    pool: &'a BufPool,
+    pool: BufPool,
 }
 
-impl<'a> ProtocolServer<'a> {
-    fn new(time: f64, pool: &'a BufPool) -> Self {
+impl ProtocolServer {
+    pub(crate) fn new(time: f64) -> Self {
         Self {
             time,
             pending_clients: Vec::new(),
             connected_clients: Vec::new(),
             outbox: VecDeque::new(),
-            pool,
+            pool: BufPool::default(),
         }
     }
-    pub(crate) fn update(&mut self, dt: f64) -> Result<(), PacketeerError> {
+    pub fn update(&mut self, dt: f64) -> Result<(), PacketeerError> {
         self.time += dt;
         self.compose_packets()?;
         Ok(())
@@ -104,7 +106,7 @@ impl<'a> ProtocolServer<'a> {
                     server_salt: pc.server_salt,
                 });
 
-                let packet = write_packet(self.pool, packet)?;
+                let packet = write_packet(&self.pool, packet)?;
                 self.outbox.push_back(AddressedPacket {
                     address: pc.socket_addr,
                     packet,
@@ -119,9 +121,10 @@ impl<'a> ProtocolServer<'a> {
         // extract_if (drain_filter for vec) isn't stable yet..
         for i in 0..self.connected_clients.len() {
             let cc = &self.connected_clients[i];
-            if self.time - cc.last_received_time > 5000. {
+            if self.time - cc.last_received_time > 5. {
                 to_remove.push(i);
             }
+            // TODO send KA if nothing else sent in a while
         }
         for i in to_remove {
             let cc = self.connected_clients.remove(i);
@@ -129,6 +132,17 @@ impl<'a> ProtocolServer<'a> {
         }
         // for connected clients, we send any messages that the packeteer layer wants
         for cc in self.connected_clients.iter_mut() {
+            // until confirmed, send a KA before messages packets
+            if !cc.confirmed {
+                let keepalive = ProtocolPacket::KeepAlive(KeepAlivePacket {
+                    header: cc.packeteer.next_packet_header(PacketType::KeepAlive)?,
+                    client_index: 0,
+                });
+                self.outbox.push_back(AddressedPacket {
+                    address: cc.socket_addr,
+                    packet: write_packet(&self.pool, keepalive)?,
+                });
+            }
             self.outbox.extend(
                 cc.packeteer
                     .drain_packets_to_send()
@@ -141,17 +155,26 @@ impl<'a> ProtocolServer<'a> {
         Ok(())
     }
 
+    // fn send_keepalive(&mut self, cc: &mut ConnectedClient) -> Result<(), PacketeerError> {
+    //     let keepalive = ProtocolPacket::KeepAlive(KeepAlivePacket {
+    //         header: cc.packeteer.next_packet_header(PacketType::KeepAlive)?,
+    //         client_index: 0,
+    //     });
+    //     self.outbox.push_back(AddressedPacket {
+    //         address: cc.socket_addr,
+    //         packet: write_packet(&self.pool, keepalive)?,
+    //     });
+    //     Ok(())
+    // }
+
     fn get_pending_by_client_salt(
         &mut self,
         client_salt: u64,
         client_addr: SocketAddr,
     ) -> Option<&PendingClient> {
-        for pc in self.pending_clients.iter_mut() {
-            if pc.client_salt == client_salt && pc.socket_addr == client_addr {
-                return Some(pc);
-            }
-        }
-        None
+        self.pending_clients
+            .iter()
+            .find(|pc| pc.client_salt == client_salt && pc.socket_addr == client_addr)
     }
     fn take_pending_by_xor_salt(
         &mut self,
@@ -176,12 +199,9 @@ impl<'a> ProtocolServer<'a> {
         xor_salt: u64,
         client_addr: SocketAddr,
     ) -> Option<&mut ConnectedClient> {
-        for cc in self.connected_clients.iter_mut() {
-            if cc.xor_salt == xor_salt && cc.socket_addr == client_addr {
-                return Some(cc);
-            }
-        }
-        None
+        self.connected_clients
+            .iter_mut()
+            .find(|cc| cc.xor_salt == xor_salt && cc.socket_addr == client_addr)
     }
 
     fn remove_connected_client(
@@ -210,7 +230,8 @@ impl<'a> ProtocolServer<'a> {
     ) -> Result<(), PacketeerError> {
         let packet_len = packet.len();
         let mut cur = Cursor::new(packet);
-        let packet = read_packet(&mut cur, self.pool)?;
+        let packet = read_packet(&mut cur, &self.pool)?;
+        log::info!("server got >>> {packet:?}");
         match packet {
             ProtocolPacket::ConnectionRequest(ConnectionRequestPacket {
                 header: _,
@@ -220,7 +241,7 @@ impl<'a> ProtocolServer<'a> {
                 if protocol_version != PROTOCOL_VERSION {
                     log::warn!("Protocol version mismatch");
                     let denied = write_packet(
-                        self.pool,
+                        &self.pool,
                         ProtocolPacket::ConnectionDenied(ConnectionDeniedPacket {
                             header: ProtocolPacketHeader::new(
                                 PacketId(0),
@@ -263,21 +284,34 @@ impl<'a> ProtocolServer<'a> {
                 if let Some(pending) =
                     self.take_pending_by_xor_salt(header.xor_salt.unwrap(), client_addr)
                 {
-                    let cc = ConnectedClient {
+                    let xor_salt = pending.client_salt ^ pending.server_salt;
+                    let mut packeteer = pending.packeteer;
+                    packeteer.xor_salt = Some(xor_salt);
+                    let mut cc = ConnectedClient {
+                        confirmed: false,
+                        client_index: None,
                         client_salt: pending.client_salt,
                         server_salt: pending.server_salt,
-                        xor_salt: pending.client_salt ^ pending.server_salt,
+                        xor_salt,
                         last_received_time: self.time,
                         last_sent_time: self.time,
                         socket_addr: client_addr,
-                        packeteer: pending.packeteer,
+                        packeteer,
                     };
-                    log::info!("New CC");
+                    // send KA
+                    let ka = ProtocolPacket::KeepAlive(KeepAlivePacket {
+                        header: cc.packeteer.next_packet_header(PacketType::KeepAlive)?,
+                        client_index: 0,
+                    });
+                    self.outbox.push_back(AddressedPacket {
+                        address: cc.socket_addr,
+                        packet: write_packet(&self.pool, ka)?,
+                    });
+                    log::info!("New CC: {client_addr:?} = {cc:?}");
                     self.connected_clients.push(cc);
-                    // send welcome packet?
                 } else {
                     let denied = write_packet(
-                        self.pool,
+                        &self.pool,
                         ProtocolPacket::ConnectionDenied(ConnectionDeniedPacket {
                             header: ProtocolPacketHeader::new(
                                 PacketId(0),
@@ -305,18 +339,45 @@ impl<'a> ProtocolServer<'a> {
                     log::info!("REMOVED CLIENT: {:?}", cc.socket_addr);
                 }
             }
-
-            ProtocolPacket::Messages(mut mp) => {
+            ProtocolPacket::KeepAlive(KeepAlivePacket {
+                header:
+                    ProtocolPacketHeader {
+                        xor_salt: Some(xor_salt),
+                        ..
+                    },
+                client_index: _, // reported by client. check it matches?
+            }) => {
+                let time = self.time;
+                if let Some(cc) = self.get_connected_client_mut(xor_salt, client_addr) {
+                    if !cc.confirmed {
+                        log::info!("Marking cc as confirmed due to KA");
+                        cc.confirmed = true;
+                    }
+                    cc.last_received_time = time;
+                } else {
+                    log::warn!("Discarding KA packet, no session");
+                }
+            }
+            ProtocolPacket::Messages(mp) => {
                 let time = self.time;
                 if let Some(cc) =
                     self.get_connected_client_mut(mp.header.xor_salt.unwrap(), client_addr)
                 {
                     cc.last_received_time = time;
+                    if !cc.confirmed {
+                        log::info!("Marking cc as confirmed due to messages");
+                        cc.confirmed = true;
+                    }
                     cc.packeteer.process_incoming_packet(packet_len, mp)?;
+                } else {
+                    log::warn!(
+                        "Server Discarding messages packet, no session {client_addr} = {mp:?}"
+                    );
+                    log::error!("connected_clients = {:?}", self.connected_clients);
                 }
             }
             p => {
-                log::warn!("Server Discarding unhandled {p:?}");
+                log::error!("Server Discarding unhandled {p:?}");
             }
         }
         Ok(())

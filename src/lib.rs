@@ -343,7 +343,7 @@ impl Packeteer {
         }
 
         if !sent_something {
-            self.send_empty_packet()?;
+            // self.send_empty_packet()?;
         }
         Ok(())
     }
@@ -479,25 +479,16 @@ impl Packeteer {
         self.process_packet_acks_and_rtt(header);
         // process messages
         // self.process_packet_messages(msg_packet.messages.filter_map(|res| res.ok()))?;
-        for msg_res in msg_packet.messages {
-            match msg_res {
-                Ok(msg) => {
-                    self.stats.messages_received += 1;
-                    info!("Parsed from packet: {msg:?}");
-                    if let Some(channel) = self.channels.get_mut(msg.channel()) {
-                        if channel.accepts_message(&msg) {
-                            self.dispatcher.process_received_message(msg);
-                        } else {
-                            trace!("Channel rejects message id {msg:?}");
-                        }
-                    }
-                }
-                Err(e) => {
-                    log::error!("Error parsing message: {e:?}");
-                    break;
+        for msg in msg_packet.messages {
+            self.stats.messages_received += 1;
+            info!("Parsed from packet: {msg:?}");
+            if let Some(channel) = self.channels.get_mut(msg.channel()) {
+                if channel.accepts_message(&msg) {
+                    self.dispatcher.process_received_message(msg);
+                } else {
+                    trace!("Channel rejects message id {msg:?}");
                 }
             }
-            //
         }
 
         Ok(())
