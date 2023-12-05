@@ -1,11 +1,11 @@
-mod client;
+mod ack_header;
+mod message;
 mod packets;
-mod server;
 pub(crate) const PROTOCOL_VERSION: u64 = 1;
 
-pub(crate) use client::*;
+pub(crate) use ack_header::*;
+pub(crate) use message::*;
 pub(crate) use packets::*;
-pub(crate) use server::*;
 
 use crate::prelude::PicklebackError;
 

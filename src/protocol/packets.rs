@@ -1,5 +1,5 @@
+use super::AckHeader;
 use crate::{
-    ack_header::AckHeader,
     buffer_pool::{BufHandle, BufPool},
     cursor::{BufferLimitedWriter, CursorExtras},
     prelude::PicklebackConfig,

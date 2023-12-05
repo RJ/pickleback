@@ -78,6 +78,15 @@ impl BufPool {
         Self { pools }
     }
 
+    pub(crate) fn full_packets_only() -> Self {
+        let pools = vec![PoolConfig {
+            starting_size: 1,
+            max_size: 10,
+            buffer_capacity: 1500,
+        }];
+        Self::new(pools)
+    }
+
     /// The empty pool always allocates a Vec with default capacity
     /// This is mostly for tests.
     #[allow(dead_code)]

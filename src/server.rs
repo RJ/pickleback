@@ -52,7 +52,7 @@ impl std::fmt::Debug for ConnectedClient {
     }
 }
 
-// this should hold the pickleback instance?
+/// Server that manages connections to multiple clients.
 pub struct PicklebackServer {
     pub(crate) time: f64,
     pending_clients: Vec<PendingClient>,
@@ -72,16 +72,16 @@ impl PicklebackServer {
             connected_clients: Vec::new(),
             tmp_buffer: Vec::new(),
             config: config.clone(),
-            // TODO this pool only for connection denied packets? tune it.
-            pool: BufPool::default(),
+            pool: BufPool::full_packets_only(),
             outbox: VecDeque::new(),
         }
     }
-    pub fn update(&mut self, dt: f64) -> Result<(), PicklebackError> {
+
+    /// Advances time, and the client connection state machines.
+    pub fn update(&mut self, dt: f64) {
         self.time += dt;
-        self.process_pending_clients()?;
-        self.process_connected_clients()?;
-        Ok(())
+        self.process_pending_clients();
+        self.process_connected_clients();
     }
 
     /// Send all pending outbound packets for all clients
@@ -102,7 +102,10 @@ impl PicklebackServer {
         }
     }
 
-    fn process_pending_clients(&mut self) -> Result<(), PicklebackError> {
+    /// Processes pending clients, catching and handling any errors.
+    ///
+    /// We don't want an error thrown by one client to abort processing for other clients.
+    fn process_pending_clients(&mut self) {
         self.tmp_buffer.clear();
         for i in 0..self.pending_clients.len() {
             let pc = &mut self.pending_clients[i];
@@ -143,10 +146,12 @@ impl PicklebackServer {
             let pc = self.pending_clients.remove(i);
             log::info!("Removed timed-out pending client: {pc:?}");
         }
-        Ok(())
     }
 
-    fn process_connected_clients(&mut self) -> Result<(), PicklebackError> {
+    /// Processes connected clients, catching and handling any errors.
+    ///
+    /// We don't want an error thrown by one client to abort processing for other clients.
+    fn process_connected_clients(&mut self) {
         self.tmp_buffer.clear();
         // for connected clients, we must timeout any that are awol
         // extract_if (drain_filter for vec) isn't stable yet..
@@ -160,7 +165,7 @@ impl PicklebackServer {
             let cc = self.connected_clients.remove(i);
             log::info!("Timed out client: {cc:?}");
         }
-        // for connected clients, we send any messages that the pickleback layer wants
+        // send any messages that the pickleback layer wants
         for cc in self.connected_clients.iter_mut() {
             // * until confirmed, send a KA before messages packets
             // * if nothing sent for a while, send a KA
@@ -188,7 +193,6 @@ impl PicklebackServer {
                 }
             }
         }
-        Ok(())
     }
 
     fn get_pending_by_client_salt(

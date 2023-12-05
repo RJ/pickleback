@@ -14,7 +14,7 @@ pub(crate) trait ChannelT {
         pool: &BufPool,
         id: MessageId,
         payload: &[u8],
-        fragmented: message::Fragmented,
+        fragmented: Fragmented,
     );
     /// called when a message has been acked by the packet layer
     fn message_ack_received(&mut self, msg_handle: &MessageHandle);
@@ -76,7 +76,7 @@ impl ChannelT for UnreliableChannel {
         pool: &BufPool,
         id: MessageId,
         payload: &[u8],
-        fragmented: message::Fragmented,
+        fragmented: Fragmented,
     ) {
         let msg = Message::new_outbound(pool, id, self.id(), payload, fragmented);
         info!(">>>>> unreliable chan enq msg: {msg:?}");
@@ -179,7 +179,7 @@ impl ChannelT for ReliableChannel {
         pool: &BufPool,
         id: MessageId,
         payload: &[u8],
-        fragmented: message::Fragmented,
+        fragmented: Fragmented,
     ) {
         let msg = Message::new_outbound(pool, id, self.id(), payload, fragmented);
         self.q.push_back(ResendableMessage::new(msg));

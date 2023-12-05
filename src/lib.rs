@@ -9,31 +9,32 @@ use std::{
     collections::{HashMap, VecDeque},
     io::{Cursor, Write},
 };
-mod ack_header;
 mod buffer_pool;
 mod channel;
+mod client;
 mod config;
 mod cursor;
 mod dispatcher;
 mod error;
 mod jitter_pipe;
-mod message;
 mod message_reassembler;
 mod pickleback;
 mod protocol;
 mod received_message;
 mod sequence_buffer;
+mod server;
 mod test_utils;
 
-pub(crate) use ack_header::*;
 pub(crate) use buffer_pool::*;
 pub(crate) use channel::*;
+pub use client::PicklebackClient;
 pub(crate) use config::*;
 pub(crate) use dispatcher::*;
 pub(crate) use error::*;
 pub(crate) use jitter_pipe::*;
-pub(crate) use message::*;
 pub(crate) use message_reassembler::*;
+pub use server::PicklebackServer;
+
 pub use pickleback::Pickleback;
 // use protocol::*;
 use received_message::*;
@@ -48,6 +49,7 @@ pub mod prelude {
     pub use super::MessageId;
     pub use super::Pickleback;
     pub use super::PicklebackStats;
+    pub use super::{PicklebackClient, PicklebackServer};
 }
 
 /// Things needed for integration tests

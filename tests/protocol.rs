@@ -29,7 +29,7 @@ fn protocol() {
     log::warn!("ADVANCING CLIENT ONLY FOR TIMEOUT TEST");
     for _ in 0..4 {
         let dt = 2.0;
-        harness.server.update(-dt).unwrap();
+        harness.server.update(-dt);
         harness.advance(dt);
     }
 }
