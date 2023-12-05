@@ -31,6 +31,7 @@ where
         }
     }
 
+    #[allow(unused)]
     pub fn reset(&mut self) {
         let size = self.entries.capacity();
         self.entries.clear();

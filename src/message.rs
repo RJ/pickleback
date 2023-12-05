@@ -1,14 +1,10 @@
 use crate::{
     buffer_pool::{BufHandle, BufPool},
     cursor::CursorExtras,
-    PicklebackError,
+    MessageId, PicklebackError,
 };
 use byteorder::{NetworkEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{Cursor, Read, Write};
-
-/// A Message, once sent, is identified by a MessageId. Use to check for acks later.
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, Default)]
-pub struct MessageId(pub(crate) u16);
 
 #[derive(Debug, Clone)]
 pub(crate) struct Fragment {

@@ -1,9 +1,6 @@
 use crate::*;
 use enum_dispatch::*;
 
-/// We use 5 bits from the message prefix byte to encode the channel id:
-pub const MAX_CHANNELS: usize = 32;
-
 #[enum_dispatch]
 pub(crate) trait ChannelT {
     fn id(&self) -> u8;

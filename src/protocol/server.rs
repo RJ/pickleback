@@ -4,12 +4,7 @@ use crate::{
     prelude::{PicklebackConfig, PicklebackError},
     PacketId, Pickleback,
 };
-use std::{
-    collections::VecDeque,
-    io::Cursor,
-    iter::{self, empty},
-    net::SocketAddr,
-};
+use std::{collections::VecDeque, io::Cursor, iter::empty, net::SocketAddr};
 
 // when server gets a ConnectionRequest, it sends a Connection Challenge Packet and creates
 // a PendingClient.
@@ -62,26 +57,39 @@ pub struct PicklebackServer {
     pub(crate) time: f64,
     pending_clients: Vec<PendingClient>,
     connected_clients: Vec<ConnectedClient>,
-    // outbox: VecDeque<AddressedPacket>,
+    tmp_buffer: Vec<usize>,
+    config: PicklebackConfig,
+    pool: BufPool,
+    // for arbitrary responses before clients are connected, like denied packets:
+    outbox: VecDeque<AddressedPacket>,
 }
 
 impl PicklebackServer {
-    pub(crate) fn new(time: f64) -> Self {
+    pub(crate) fn new(time: f64, config: &PicklebackConfig) -> Self {
         Self {
             time,
             pending_clients: Vec::new(),
             connected_clients: Vec::new(),
-            // outbox: VecDeque::new(),
+            tmp_buffer: Vec::new(),
+            config: config.clone(),
+            // TODO this pool only for connection denied packets? tune it.
+            pool: BufPool::default(),
+            outbox: VecDeque::new(),
         }
     }
     pub fn update(&mut self, dt: f64) -> Result<(), PicklebackError> {
         self.time += dt;
-        self.compose_packets()?;
+        self.process_pending_clients()?;
+        self.process_connected_clients()?;
         Ok(())
     }
 
     /// Send all pending outbound packets for all clients
     pub fn visit_packets_to_send(&mut self, mut send_fn: impl FnMut(SocketAddr, BufHandle)) {
+        // the packets the server generates that don't belong to a (pending)client's pickleback:
+        for AddressedPacket { address, packet } in self.outbox.drain(..) {
+            send_fn(address, packet);
+        }
         for pc in &mut self.pending_clients {
             pc.pickleback
                 .drain_packets_to_send()
@@ -94,82 +102,91 @@ impl PicklebackServer {
         }
     }
 
-    fn compose_packets(&mut self) -> Result<(), PicklebackError> {
-        let mut to_remove = Vec::new();
-
-        // Run state-machine for pending clients:
-        // TODO need to time out and clean up quiet pending clients
+    fn process_pending_clients(&mut self) -> Result<(), PicklebackError> {
+        self.tmp_buffer.clear();
         for i in 0..self.pending_clients.len() {
             let pc = &mut self.pending_clients[i];
+            // client's can't be pending for more than 5 seconds
             if self.time - pc.first_requested_time > 5. {
-                to_remove.push(i);
+                self.tmp_buffer.push(i);
                 continue;
             }
+            // resend challenges every 100ms
             if pc.last_challenged_at < self.time - 0.1 {
                 pc.last_challenged_at = self.time;
+                let header = match pc
+                    .pickleback
+                    .next_packet_header(PacketType::ConnectionChallenge)
+                {
+                    Ok(h) => h,
+                    Err(PicklebackError::Backpressure(_)) => continue,
+                    Err(e) => {
+                        log::error!("Pending client err: {e:?}");
+                        continue;
+                    }
+                };
                 let packet = ProtocolPacket::ConnectionChallenge(ConnectionChallengePacket {
-                    header: pc
-                        .pickleback
-                        .next_packet_header(PacketType::ConnectionChallenge)?,
+                    header,
                     client_salt: pc.client_salt,
                     server_salt: pc.server_salt,
                 });
-                pc.pickleback.send_packet(packet)?;
+                match pc.pickleback.send_packet(packet) {
+                    Ok(_) => {}
+                    Err(PicklebackError::Backpressure(_)) => {}
+                    Err(e) => {
+                        log::error!("Pending client: {e:?}");
+                    }
+                }
             }
         }
-        for i in to_remove.drain(..) {
+        for i in self.tmp_buffer.drain(..) {
             let pc = self.pending_clients.remove(i);
             log::info!("Removed timed-out pending client: {pc:?}");
         }
+        Ok(())
+    }
+
+    fn process_connected_clients(&mut self) -> Result<(), PicklebackError> {
+        self.tmp_buffer.clear();
         // for connected clients, we must timeout any that are awol
         // extract_if (drain_filter for vec) isn't stable yet..
         for i in 0..self.connected_clients.len() {
             let cc = &self.connected_clients[i];
             if self.time - cc.last_received_time > 5. {
-                to_remove.push(i);
+                self.tmp_buffer.push(i);
             }
         }
-        for i in to_remove {
+        for i in self.tmp_buffer.drain(..) {
             let cc = self.connected_clients.remove(i);
             log::info!("Timed out client: {cc:?}");
         }
         // for connected clients, we send any messages that the pickleback layer wants
         for cc in self.connected_clients.iter_mut() {
-            // let pre_len = self.outbox.len();
             // * until confirmed, send a KA before messages packets
             // * if nothing sent for a while, send a KA
             if !cc.confirmed || self.time - cc.last_sent_time > 0.1 {
+                let header = match cc.pickleback.next_packet_header(PacketType::KeepAlive) {
+                    Ok(h) => h,
+                    Err(PicklebackError::Backpressure(_)) => continue,
+                    Err(e) => {
+                        log::error!("Pending client err: {e:?}");
+                        continue;
+                    }
+                };
+
                 let keepalive = ProtocolPacket::KeepAlive(KeepAlivePacket {
-                    header: cc.pickleback.next_packet_header(PacketType::KeepAlive)?,
+                    header,
                     xor_salt: cc.xor_salt,
                     client_index: cc.client_index.unwrap_or_default(), // TODO
                 });
-                cc.pickleback.send_packet(keepalive)?;
+                match cc.pickleback.send_packet(keepalive) {
+                    Ok(_) => {}
+                    Err(PicklebackError::Backpressure(_)) => {}
+                    Err(e) => {
+                        log::error!("Connected client: {e:?}");
+                    }
+                }
             }
-            // self.outbox
-            //     .extend(
-            //         cc.pickleback
-            //             .drain_packets_to_send()
-            //             .map(|packet| AddressedPacket {
-            //                 address: cc.socket_addr,
-            //                 packet,
-            //             }),
-            //     );
-            // if self.outbox.len() != pre_len {
-            //     cc.last_sent_time = self.time;
-            // } else if cc.pickleback.received_unacked_packets() > 0 {
-            //     // still have acks to deliver? send a ka packet just for acks.
-            //     let keepalive = ProtocolPacket::KeepAlive(KeepAlivePacket {
-            //         header: cc.pickleback.next_packet_header(PacketType::KeepAlive)?,
-            //         xor_salt: cc.xor_salt,
-            //         client_index: cc.client_index.unwrap_or_default(), // TODO
-            //     });
-            //     self.outbox.push_back(AddressedPacket {
-            //         address: cc.socket_addr,
-            //         packet: write_packet(&self.pool, keepalive)?,
-            //     });
-            //     cc.last_sent_time = self.time;
-            // }
         }
         Ok(())
     }
@@ -183,6 +200,8 @@ impl PicklebackServer {
             .iter()
             .find(|pc| pc.client_salt == client_salt && pc.socket_addr == client_addr)
     }
+    // TODO this should be take by client salt/server salt? dont want people to be able to take using
+    // sniffed salts
     fn take_pending_by_xor_salt(
         &mut self,
         xor_salt: u64,
@@ -246,23 +265,23 @@ impl PicklebackServer {
             }) => {
                 if protocol_version != PROTOCOL_VERSION {
                     log::warn!("Protocol version mismatch");
-                    // TODO:
-                    // let denied = write_packet(
-                    //     &self.pool,
-                    //     ProtocolPacket::ConnectionDenied(ConnectionDeniedPacket {
-                    //         header: ProtocolPacketHeader::new(
-                    //             PacketId(0),
-                    //             empty(),
-                    //             0,
-                    //             PacketType::ConnectionDenied,
-                    //         )?,
-                    //         reason: 0, // TODO
-                    //     }),
-                    // )?;
-                    // self.outbox.push_back(AddressedPacket {
-                    //     address: client_addr,
-                    //     packet: denied,
-                    // });
+                    let denied = write_packet(
+                        &self.pool,
+                        &self.config,
+                        ProtocolPacket::ConnectionDenied(ConnectionDeniedPacket {
+                            header: ProtocolPacketHeader::new(
+                                PacketId(0),
+                                empty(),
+                                0,
+                                PacketType::ConnectionDenied,
+                            )?,
+                            reason: DisconnectReason::ProtocolMismatch,
+                        }),
+                    )?;
+                    self.outbox.push_back(AddressedPacket {
+                        address: client_addr,
+                        packet: denied,
+                    });
                     return Ok(());
                 }
                 if let Some(_pending) = self.get_pending_by_client_salt(client_salt, client_addr) {
@@ -285,12 +304,16 @@ impl PicklebackServer {
             }) => {
                 // there should be a pending client when we get a challenge response
                 if let Some(pending) = self.take_pending_by_xor_salt(xor_salt, client_addr) {
+                    if xor_salt != pending.client_salt ^ pending.server_salt {
+                        // TODO return a denied packet?
+                        return Err(PicklebackError::InvalidPacket);
+                    }
                     let mut pickleback = pending.pickleback;
-                    pickleback.xor_salt = Some(xor_salt);
+                    pickleback.set_xor_salt(Some(xor_salt));
                     let mut cc = ConnectedClient {
                         confirmed: false,
                         client_index: None,
-                        xor_salt: pending.client_salt ^ pending.server_salt,
+                        xor_salt,
                         last_received_time: self.time,
                         last_sent_time: self.time,
                         socket_addr: client_addr,
@@ -306,23 +329,23 @@ impl PicklebackServer {
                     log::info!("New CC: {client_addr:?} = {cc:?}");
                     self.connected_clients.push(cc);
                 } else {
-                    // TODO:
-                    // let denied = write_packet(
-                    //     &self.pool,
-                    //     ProtocolPacket::ConnectionDenied(ConnectionDeniedPacket {
-                    //         header: ProtocolPacketHeader::new(
-                    //             PacketId(0),
-                    //             empty(),
-                    //             0,
-                    //             PacketType::ConnectionDenied,
-                    //         )?,
-                    //         reason: 0,
-                    //     }),
-                    // )?;
-                    // self.outbox.push_back(AddressedPacket {
-                    //     address: client_addr,
-                    //     packet: denied,
-                    // });
+                    let denied = write_packet(
+                        &self.pool,
+                        &self.config,
+                        ProtocolPacket::ConnectionDenied(ConnectionDeniedPacket {
+                            header: ProtocolPacketHeader::new(
+                                PacketId(0),
+                                empty(),
+                                0,
+                                PacketType::ConnectionDenied,
+                            )?,
+                            reason: DisconnectReason::HandshakeTimeout,
+                        }),
+                    )?;
+                    self.outbox.push_back(AddressedPacket {
+                        address: client_addr,
+                        packet: denied,
+                    });
                 }
             }
 
@@ -346,7 +369,7 @@ impl PicklebackServer {
                         cc.confirmed = true;
                     }
                     cc.last_received_time = time;
-                    cc.pickleback.process_packet_acks_and_rtt(&header);
+                    cc.pickleback.process_incoming_packet(&header, &mut cur)?;
                 } else {
                     log::warn!("Discarding KA packet, no session");
                 }

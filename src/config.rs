@@ -1,4 +1,4 @@
-use crate::message_reassembler::MAX_FRAGMENTS;
+use crate::MAX_FRAGMENTS;
 
 /// Various tunables. Mostly buffer sizes.
 #[derive(Clone)]

@@ -1,6 +1,10 @@
 use std::{io::Cursor, net::SocketAddr};
 
-use crate::{buffer_pool::BufHandle, prelude::PicklebackError, Pickleback};
+use crate::{
+    buffer_pool::BufHandle,
+    prelude::{PicklebackConfig, PicklebackError},
+    Pickleback,
+};
 
 use super::*;
 
@@ -11,14 +15,6 @@ pub enum ClientState {
     Connected,
     Disconnected(DisconnectReason),
     SelfInitiatedDisconnect,
-}
-
-#[derive(Debug, PartialEq)]
-pub enum DisconnectReason {
-    Normal,
-    TimedOut,
-    // SelfInitiated,
-    ServerDenied(u8),
 }
 
 pub struct PicklebackClient {
@@ -35,7 +31,7 @@ pub struct PicklebackClient {
 }
 
 impl PicklebackClient {
-    pub fn new(time: f64) -> Self {
+    pub fn new(time: f64, config: &PicklebackConfig) -> Self {
         Self {
             time,
             state: ClientState::Disconnected(DisconnectReason::Normal),
@@ -45,7 +41,7 @@ impl PicklebackClient {
             proto_last_send: 0.0,
             last_receive_time: 0.0,
             last_send_time: 0.0,
-            pickleback: Pickleback::default(),
+            pickleback: Pickleback::new(config.clone(), 0.0),
             server_addr: "127.0.0.1:6000".parse().expect("Invalid server address"),
         }
     }
@@ -77,7 +73,8 @@ impl PicklebackClient {
         self.proto_last_send = 0.0;
         self.last_receive_time = 0.0;
         self.last_send_time = 0.0;
-        self.pickleback = Pickleback::default();
+        let config = self.pickleback.config().clone();
+        self.pickleback = Pickleback::new(config, 0.0);
     }
 
     /// Cleanly disconnect from the server. This may add packets to the out_buffer for you
@@ -124,6 +121,7 @@ impl PicklebackClient {
         &mut self,
         mut send_fn: impl FnMut(SocketAddr, BufHandle),
     ) -> Result<(), PicklebackError> {
+        let mut keepalive_needed = false;
         match self.state {
             ClientState::SelfInitiatedDisconnect if self.xor_salt.is_some() => {
                 for _ in 0..10 {
@@ -165,34 +163,33 @@ impl PicklebackClient {
             }
 
             ClientState::Connected => {
-                // should happen in update?
-                let backpressure = match self.pickleback.compose_packets() {
-                    Ok(_) => false,
-                    Err(PicklebackError::Backpressure(_)) => true,
-                    Err(e) => return Err(e),
-                };
-                // send keepalive if nothing sent in a while (unless backpressure)
-                if !backpressure
-                    && !self.pickleback.has_packets_to_send()
-                    && self.time - self.last_send_time >= 0.1
-                {
-                    log::info!("Client is sending keepalive");
-                    let keepalive = ProtocolPacket::KeepAlive(KeepAlivePacket {
-                        header: self.pickleback.next_packet_header(PacketType::KeepAlive)?,
-                        client_index: 0,
-                        xor_salt: self
-                            .xor_salt
-                            .expect("Should be an xor_salt in Connected state"),
-                    });
-                    self.send(keepalive)?;
-                }
+                keepalive_needed = self.time - self.last_send_time >= 0.1;
             }
 
             _ => {}
         }
-        self.pickleback
-            .drain_packets_to_send()
-            .for_each(|packet| send_fn(self.server_addr, packet));
+        let mut sent = 0;
+
+        self.pickleback.drain_packets_to_send().for_each(|packet| {
+            send_fn(self.server_addr, packet);
+            sent += 1;
+        });
+
+        if sent == 0 && keepalive_needed {
+            log::info!("Client is sending keepalive");
+            let keepalive = ProtocolPacket::KeepAlive(KeepAlivePacket {
+                header: self.pickleback.next_packet_header(PacketType::KeepAlive)?,
+                client_index: 0,
+                xor_salt: self
+                    .xor_salt
+                    .expect("Should be an xor_salt in Connected state"),
+            });
+            self.send(keepalive)?;
+            self.pickleback
+                .drain_packets_to_send()
+                .for_each(|packet| send_fn(self.server_addr, packet));
+        }
+
         Ok(())
     }
 
@@ -223,16 +220,14 @@ impl PicklebackClient {
                         None
                     }
                 }
-                ProtocolPacket::ConnectionDenied(ConnectionDeniedPacket { header, reason }) => {
+                ProtocolPacket::ConnectionDenied(ConnectionDeniedPacket { reason, .. }) => {
                     if self.state == ClientState::SendingConnectionRequest
                         || self.state == ClientState::SendingChallengeResponse
                     {
                         log::warn!("Connection was denied: {reason}");
                         self.server_salt = None;
                         self.xor_salt = None;
-                        Some(ClientState::Disconnected(DisconnectReason::ServerDenied(
-                            reason,
-                        )))
+                        Some(ClientState::Disconnected(reason))
                     } else {
                         None
                     }

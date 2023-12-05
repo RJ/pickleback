@@ -5,7 +5,7 @@ use crate::SequenceBuffer;
 use byteorder::{NetworkEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{Cursor, Write};
 
-pub(crate) const MAX_ACK_BYTES: u8 = 10; // MAX_ACK_BYTES*7 = num acks.
+pub(crate) const MAX_ACK_BYTES: u8 = 50; // MAX_ACK_BYTES*7 = num acks.
 pub(crate) const MAX_UNACKED_PACKETS: u16 = 7 * MAX_ACK_BYTES as u16;
 
 /// ack bitfield written like so:

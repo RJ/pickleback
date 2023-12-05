@@ -65,6 +65,7 @@ impl MessageTestHarness {
             pool: BufPool::default(),
         }
     }
+
     pub fn collect_client_acks(&mut self, channel: u8) -> Vec<MessageId> {
         self.client.drain_message_acks(channel).collect::<Vec<_>>()
     }
@@ -100,9 +101,15 @@ impl MessageTestHarness {
     /// # Panics
     /// if packet writing fails
     pub fn advance(&mut self, dt: f64) -> &TransmissionStats {
-        debug!("🟡 server.update({dt}) --> {} ----", self.server.time + dt);
+        debug!(
+            "🟡 server.update({dt}) --> {} ----",
+            self.server.time() + dt
+        );
         self.server.update(dt);
-        debug!("🟠 client.update({dt}) --> {} ----", self.server.time + dt);
+        debug!(
+            "🟠 client.update({dt}) --> {} ----",
+            self.server.time() + dt
+        );
         self.client.update(dt);
         let empty = Vec::new();
         let server_drop_indices = self.server_drop_indices.as_ref().unwrap_or(&empty);
@@ -172,12 +179,13 @@ pub struct ProtocolTestHarness {
     pool: BufPool,
 }
 impl ProtocolTestHarness {
-    pub fn new(config: JitterPipeConfig) -> Self {
-        let server_jitter_pipe = JitterPipe::new(config.clone());
-        let client_jitter_pipe = JitterPipe::new(config);
+    pub fn new(jitter_config: JitterPipeConfig) -> Self {
+        let server_jitter_pipe = JitterPipe::new(jitter_config.clone());
+        let client_jitter_pipe = JitterPipe::new(jitter_config);
         let time = 0.0;
-        let server = PicklebackServer::new(time);
-        let client = PicklebackClient::new(time);
+        let config = PicklebackConfig::default();
+        let server = PicklebackServer::new(time, &config);
+        let client = PicklebackClient::new(time, &config);
         Self {
             server,
             client,

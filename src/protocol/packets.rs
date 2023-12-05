@@ -11,6 +11,8 @@ use std::{
     net::SocketAddr,
 };
 
+use super::DisconnectReason;
+
 #[derive(Clone, Eq, PartialEq)]
 pub struct AddressedPacket {
     pub address: SocketAddr,
@@ -198,7 +200,7 @@ pub(crate) struct ConnectionChallengeResponsePacket {
 #[derive(Debug)]
 pub(crate) struct ConnectionDeniedPacket {
     pub(crate) header: ProtocolPacketHeader,
-    pub(crate) reason: u8,
+    pub(crate) reason: DisconnectReason,
 }
 
 // Bidirectional
@@ -287,7 +289,7 @@ pub(crate) fn write_packet(
         }
         ProtocolPacket::ConnectionDenied(ConnectionDeniedPacket { header, reason }) => {
             header.write(&mut writer)?;
-            writer.write_u8(reason)?;
+            writer.write_u8(reason as u8)?;
         }
         ProtocolPacket::Disconnect(DisconnectPacket { header, xor_salt }) => {
             header.write(&mut writer)?;
@@ -350,7 +352,7 @@ pub(crate) fn read_packet(reader: &mut Cursor<&[u8]>) -> Result<ProtocolPacket, 
         PacketType::ConnectionDenied => {
             let c = ConnectionDeniedPacket {
                 header,
-                reason: reader.read_u8()?,
+                reason: DisconnectReason::try_from(reader.read_u8()?)?,
             };
             Ok(ProtocolPacket::ConnectionDenied(c))
         }

@@ -1,9 +1,5 @@
 use crate::*;
 
-/// With a fragment size of 1kB, this gives 1MB.
-/// Totally arbitrary, but anything more than this should probably be transferred by other means?
-pub const MAX_FRAGMENTS: usize = 1024;
-
 /// Represents a mesage being assembled from fragments.
 /// once all fragments provided, a normal Message is produced.
 ///
