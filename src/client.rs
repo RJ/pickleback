@@ -8,12 +8,18 @@ use crate::{
 
 use super::*;
 
+/// Connection state of a client.
 #[derive(Debug, PartialEq)]
 pub enum ClientState {
+    /// Initial connection establishment request
     SendingConnectionRequest,
+    /// Responding to server's handshake challenge
     SendingChallengeResponse,
+    /// Fully connected
     Connected,
+    /// Disconnected with a reason
     Disconnected(DisconnectReason),
+    /// In the midst of disconnecting cleanly, will soon be Disconnected.
     SelfInitiatedDisconnect,
 }
 
@@ -60,6 +66,11 @@ impl PicklebackClient {
         }
     }
 
+    /// Gives an iterator of new messages received by this client
+    pub fn drain_received_messages(&mut self, channel: u8) -> std::vec::Drain<'_, ReceivedMessage> {
+        self.pickleback.drain_received_messages(channel)
+    }
+
     fn state_transition(&mut self, new_state: ClientState) {
         log::info!("Client transition {:?} --> {new_state:?}", self.state);
         self.state = new_state;
@@ -98,6 +109,11 @@ impl PicklebackClient {
                 self.state_transition(ClientState::Disconnected(DisconnectReason::Normal));
             }
         }
+    }
+
+    /// Returns ClientState
+    pub fn state(&self) -> &ClientState {
+        &self.state
     }
 
     /// Initiate connection to `server`.

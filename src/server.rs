@@ -28,8 +28,9 @@ impl std::fmt::Debug for PendingClient {
     }
 }
 
-// When server gets a Connection Challenge Response, it promotes from PendingClient to ConnectedClient
-pub(crate) struct ConnectedClient {
+/// When server gets a Connection Challenge Response, it promotes from PendingClient to ConnectedClient
+/// TODO proxy methods like drain_acks and drain_msgs?
+pub struct ConnectedClient {
     xor_salt: u64,
     socket_addr: SocketAddr,
     confirmed: bool,
@@ -39,7 +40,7 @@ pub(crate) struct ConnectedClient {
     /// time we last sent a packet to this client
     last_sent_time: f64,
     /// endpoint for messages
-    pickleback: Pickleback,
+    pub pickleback: Pickleback,
 }
 
 impl std::fmt::Debug for ConnectedClient {
@@ -65,7 +66,8 @@ pub struct PicklebackServer {
 }
 
 impl PicklebackServer {
-    pub(crate) fn new(time: f64, config: &PicklebackConfig) -> Self {
+    /// New PicklebackServer
+    pub fn new(time: f64, config: &PicklebackConfig) -> Self {
         Self {
             time,
             pending_clients: Vec::new(),
@@ -75,6 +77,11 @@ impl PicklebackServer {
             pool: BufPool::full_packets_only(),
             outbox: VecDeque::new(),
         }
+    }
+
+    /// All clients in the Connected state
+    pub fn connected_clients_mut(&mut self) -> impl Iterator<Item = &mut ConnectedClient> {
+        self.connected_clients.iter_mut()
     }
 
     /// Advances time, and the client connection state machines.

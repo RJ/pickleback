@@ -11,7 +11,8 @@ pub struct PoolConfig {
     buffer_capacity: usize,
 }
 
-pub(crate) type BufHandle = RcRecycled<Vec<u8>>;
+/// A reference counted smart pointer to a pooled buffer, managed by Pickleback's Buffer Pool.
+pub type BufHandle = RcRecycled<Vec<u8>>;
 
 /// `BufPool` manages multiple pools of Vec<u8> buffers, with varying capacities.
 /// When you request a pooled buffer, you ask for something with a certain minimum capacity,

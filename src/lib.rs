@@ -25,6 +25,7 @@ mod sequence_buffer;
 mod server;
 mod test_utils;
 
+pub use buffer_pool::BufHandle;
 pub(crate) use buffer_pool::*;
 pub(crate) use channel::*;
 pub use client::PicklebackClient;
@@ -43,9 +44,11 @@ use sequence_buffer::*;
 /// Easy importing of all the important bits
 pub mod prelude {
     pub use super::buffer_pool::PoolConfig;
+    pub use super::client::ClientState;
     pub use super::config::PicklebackConfig;
     pub use super::error::{Backpressure, PicklebackError};
     pub use super::received_message::ReceivedMessage;
+    pub use super::BufHandle;
     pub use super::MessageId;
     pub use super::Pickleback;
     pub use super::PicklebackStats;

@@ -168,7 +168,7 @@ impl MessageTestHarness {
     }
 }
 
-/// A test harness that creates two Pickleback endpoints, and "connects" them via JitterPipes
+/// A test harness that creates a PicklebackServer and PicklebackClient, and "connects" them via JitterPipes
 pub struct ProtocolTestHarness {
     pub server: PicklebackServer,
     pub client: PicklebackClient,
@@ -176,7 +176,7 @@ pub struct ProtocolTestHarness {
     pub client_jitter_pipe: JitterPipe<AddressedPacket>,
     server_drop_indices: Option<Vec<u32>>,
     pub stats: TransmissionStats,
-    pool: BufPool,
+    // pool: BufPool,
 }
 impl ProtocolTestHarness {
     pub fn new(jitter_config: JitterPipeConfig) -> Self {
@@ -185,7 +185,9 @@ impl ProtocolTestHarness {
         let time = 0.0;
         let config = PicklebackConfig::default();
         let server = PicklebackServer::new(time, &config);
-        let client = PicklebackClient::new(time, &config);
+        let mut client = PicklebackClient::new(time, &config);
+        // addr doesn't matter in this test harness, it just has to be valid
+        client.connect("127.0.0.1:0");
         Self {
             server,
             client,
@@ -193,7 +195,7 @@ impl ProtocolTestHarness {
             client_jitter_pipe,
             server_drop_indices: None,
             stats: TransmissionStats::default(),
-            pool: BufPool::default(),
+            // pool: BufPool::default(),
         }
     }
     /*
