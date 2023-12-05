@@ -17,6 +17,9 @@ pub enum ClientState {
     SelfInitiatedDisconnect,
 }
 
+/// The client end of a connection.
+///
+/// Connects to a `PicklebackServer` instance.
 pub struct PicklebackClient {
     pub(crate) time: f64,
     state: ClientState,
@@ -27,10 +30,11 @@ pub struct PicklebackClient {
     last_receive_time: f64,
     last_send_time: f64,
     pub(crate) pickleback: Pickleback,
-    server_addr: SocketAddr,
+    server_addr: Option<SocketAddr>,
 }
 
 impl PicklebackClient {
+    /// Create a client, initially in a normal Disconnected state.
     pub fn new(time: f64, config: &PicklebackConfig) -> Self {
         Self {
             time,
@@ -42,10 +46,11 @@ impl PicklebackClient {
             last_receive_time: 0.0,
             last_send_time: 0.0,
             pickleback: Pickleback::new(config.clone(), 0.0),
-            server_addr: "127.0.0.1:6000".parse().expect("Invalid server address"),
+            server_addr: None, //"127.0.0.1:6000".parse().expect("Invalid server address"),
         }
     }
 
+    /// Advance time. This can potentially result in this connection timing out.
     pub fn update(&mut self, dt: f64) {
         self.time += dt;
         if !matches!(self.state, ClientState::Disconnected(_))
@@ -66,13 +71,14 @@ impl PicklebackClient {
     }
 
     fn reset(&mut self) {
-        log::info!("Reseting ProtocolClient");
+        log::info!("Reseting PicklebackClient");
         self.client_salt = None;
         self.server_salt = None;
         self.xor_salt = None;
         self.proto_last_send = 0.0;
         self.last_receive_time = 0.0;
         self.last_send_time = 0.0;
+        self.server_addr = None;
         let config = self.pickleback.config().clone();
         self.pickleback = Pickleback::new(config, 0.0);
     }
@@ -94,7 +100,13 @@ impl PicklebackClient {
         }
     }
 
-    pub fn connect(&mut self) {
+    /// Initiate connection to `server`.
+    ///
+    /// # Panics
+    /// Will panic if server address can't parse to a SocketAddr.
+    pub fn connect(&mut self, server: &str) {
+        let server_addr: SocketAddr = server.parse().expect("Invalid server address");
+        self.server_addr = Some(server_addr);
         self.server_salt = None;
         self.xor_salt = None;
         self.client_salt = Some(rand::random::<u64>());
@@ -105,8 +117,7 @@ impl PicklebackClient {
         self.state_transition(ClientState::SendingConnectionRequest);
     }
 
-    /// Serializes the ProtocolPacket, wraps in AddressedPacket with the server_addr, and appends
-    /// to self.out_buffer for sending.
+    /// Serializes the ProtocolPacket and appends to self.out_buffer for sending.
     pub(crate) fn send(&mut self, packet: ProtocolPacket) -> Result<(), PicklebackError> {
         self.pickleback.send_packet(packet)?;
         self.last_send_time = self.time;
@@ -117,49 +128,68 @@ impl PicklebackClient {
     ///
     /// In case we aren't fully connected, this could be resending challenge responses etc.
     /// If we are connected, it delegates to pickleback for messages packets.
-    pub fn visit_packets_to_send(
-        &mut self,
-        mut send_fn: impl FnMut(SocketAddr, BufHandle),
-    ) -> Result<(), PicklebackError> {
+    ///
+    /// # Panics
+    /// Only on internal logic errors
+    pub fn visit_packets_to_send(&mut self, mut send_fn: impl FnMut(SocketAddr, BufHandle)) {
+        let Some(server_addr) = self.server_addr else {
+            return;
+        };
+
         let mut keepalive_needed = false;
         match self.state {
             ClientState::SelfInitiatedDisconnect if self.xor_salt.is_some() => {
                 for _ in 0..10 {
-                    let d = ProtocolPacket::Disconnect(DisconnectPacket {
-                        header: self.pickleback.next_packet_header(PacketType::Disconnect)?,
-                        xor_salt: self.xor_salt.unwrap(),
-                    });
-                    self.send(d)?;
+                    if let Ok(header) = self.pickleback.next_packet_header(PacketType::Disconnect) {
+                        let d = ProtocolPacket::Disconnect(DisconnectPacket {
+                            header,
+                            xor_salt: self.xor_salt.unwrap(),
+                        });
+                        // disconnecting, so ignore failures:
+                        let _ = self.send(d);
+                    }
                 }
                 log::info!("Reseting Protocol Client state after disconnect");
                 self.state_transition(ClientState::Disconnected(DisconnectReason::Normal));
             }
 
             ClientState::SendingConnectionRequest if self.proto_last_send < self.time - 0.1 => {
-                self.proto_last_send = self.time;
-                let header = self
+                if let Ok(header) = self
                     .pickleback
-                    .next_packet_header(PacketType::ConnectionRequest)?;
-                self.send(ProtocolPacket::ConnectionRequest(ConnectionRequestPacket {
-                    protocol_version: PROTOCOL_VERSION,
-                    client_salt: self.client_salt.unwrap(),
-                    header,
-                }))?;
+                    .next_packet_header(PacketType::ConnectionRequest)
+                {
+                    if self
+                        .send(ProtocolPacket::ConnectionRequest(ConnectionRequestPacket {
+                            protocol_version: PROTOCOL_VERSION,
+                            client_salt: self.client_salt.unwrap(),
+                            header,
+                        }))
+                        .is_ok()
+                    {
+                        self.proto_last_send = self.time;
+                    }
+                }
             }
 
             ClientState::SendingChallengeResponse
                 if self.proto_last_send < self.time - 0.1 && self.xor_salt.is_some() =>
             {
-                self.proto_last_send = self.time;
-                let header = self
+                if let Ok(header) = self
                     .pickleback
-                    .next_packet_header(PacketType::ConnectionChallengeResponse)?;
-                self.send(ProtocolPacket::ConnectionChallengeResponse(
-                    ConnectionChallengeResponsePacket {
-                        header,
-                        xor_salt: self.xor_salt.unwrap(),
-                    },
-                ))?;
+                    .next_packet_header(PacketType::ConnectionChallengeResponse)
+                {
+                    if self
+                        .send(ProtocolPacket::ConnectionChallengeResponse(
+                            ConnectionChallengeResponsePacket {
+                                header,
+                                xor_salt: self.xor_salt.unwrap(),
+                            },
+                        ))
+                        .is_ok()
+                    {
+                        self.proto_last_send = self.time;
+                    }
+                }
             }
 
             ClientState::Connected => {
@@ -171,30 +201,42 @@ impl PicklebackClient {
         let mut sent = 0;
 
         self.pickleback.drain_packets_to_send().for_each(|packet| {
-            send_fn(self.server_addr, packet);
+            send_fn(server_addr, packet);
             sent += 1;
         });
 
         if sent == 0 && keepalive_needed {
-            log::info!("Client is sending keepalive");
-            let keepalive = ProtocolPacket::KeepAlive(KeepAlivePacket {
-                header: self.pickleback.next_packet_header(PacketType::KeepAlive)?,
-                client_index: 0,
-                xor_salt: self
-                    .xor_salt
-                    .expect("Should be an xor_salt in Connected state"),
-            });
-            self.send(keepalive)?;
+            log::info!("Client needs to send keepalive");
+            // it's possible we can't, due to backpressure because of too many unacked packets
+            // in flight, but in that case there's probably no hope for this connection anyway.
+            if let Ok(header) = self.pickleback.next_packet_header(PacketType::KeepAlive) {
+                let keepalive = ProtocolPacket::KeepAlive(KeepAlivePacket {
+                    header,
+                    client_index: 0,
+                    xor_salt: self
+                        .xor_salt
+                        .expect("Should be an xor_salt in Connected state"),
+                });
+                let _ = self.send(keepalive);
+            }
             self.pickleback
                 .drain_packets_to_send()
-                .for_each(|packet| send_fn(self.server_addr, packet));
+                .for_each(|packet| send_fn(server_addr, packet));
         }
-
-        Ok(())
     }
 
+    /// Process received packet.
+    ///
+    /// # Errors
+    /// * `PicklebackError::SocketAddrMismatch` - if packet from source other than server we connected to
+    /// * `PicklebackError::InvalidPacket` - malformed packet
     pub fn receive(&mut self, packet: &[u8], source: SocketAddr) -> Result<(), PicklebackError> {
-        assert_eq!(source, self.server_addr, "source and server addr mismatch"); // TODO
+        let Some(server_addr) = self.server_addr else {
+            return Ok(());
+        };
+        if server_addr != source {
+            return Err(PicklebackError::SocketAddrMismatch);
+        }
         let mut cur = Cursor::new(packet);
         let new_state = {
             let packet = read_packet(&mut cur)?;

@@ -253,6 +253,15 @@ impl PicklebackServer {
         None
     }
 
+    /// Process a packet received from the network.
+    ///
+    /// # Errors
+    ///
+    /// * Invalid packets cause an error
+    /// * Errors sending to clients can cause error.
+    ///
+    /// However, this processes one packet at a time, so thrown errors won't prevent processing
+    /// packets for other clients.
     pub fn receive(
         &mut self,
         packet: &[u8],
@@ -323,7 +332,7 @@ impl PicklebackServer {
                         socket_addr: client_addr,
                         pickleback,
                     };
-                    // send KA
+                    // send KA - new connection, so not catching any errors here.
                     let ka = ProtocolPacket::KeepAlive(KeepAlivePacket {
                         header: cc.pickleback.next_packet_header(PacketType::KeepAlive)?,
                         xor_salt: cc.xor_salt,

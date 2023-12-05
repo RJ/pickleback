@@ -100,6 +100,7 @@ impl Pickleback {
         self.packet_loss
     }
 
+    /// The current time, as advanced by calling `update()`.
     pub fn time(&self) -> f64 {
         self.time
     }

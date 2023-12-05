@@ -56,8 +56,8 @@ impl Iterator for AckHeader {
         let b = self.bit_buffer[self.byte_offset as usize];
         let mask = 1_u8 << self.bit_offset;
         let is_acked = b & mask == mask;
-        let seq_offset = 7 * self.byte_offset + self.bit_offset;
-        let sequence = self.ack_id.0.wrapping_sub(seq_offset as u16);
+        let seq_offset = 7_u16 * self.byte_offset as u16 + self.bit_offset as u16;
+        let sequence = self.ack_id.0.wrapping_sub(seq_offset);
         if self.bit_offset == 6 {
             if (b & 0b10000000) != 0b10000000 {
                 // no continuation bit, ensure we terminate next time

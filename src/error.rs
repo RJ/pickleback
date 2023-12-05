@@ -19,6 +19,8 @@ pub enum PicklebackError {
     PayloadTooBig,
     /// Channel doesn't exist
     NoSuchChannel,
+    /// Packets received from wrong source
+    SocketAddrMismatch,
 }
 
 /// Reasons for not being able to send due to backpressure
