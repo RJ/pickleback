@@ -1,11 +1,11 @@
-extern crate packeteer;
+extern crate pickleback;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 
 use log::*;
-use packeteer::prelude::*;
-use packeteer::testing::*;
+use pickleback::prelude::*;
+use pickleback::testing::*;
 
 /// How many messages to send during soak tests:
 const NUM_TEST_MSGS: usize = 100000;
@@ -18,7 +18,7 @@ const MAX_FRAGMENTS: u32 = 10;
 fn soak_message_transmission() {
     init_logger();
     let channel = 0;
-    let mut harness = TestHarness::new(JitterPipeConfig::disabled());
+    let mut harness = MessageTestHarness::new(JitterPipeConfig::disabled());
 
     // pre-generate test messages of varying sizes, many of which require fragmentation
     let test_msgs = (0..NUM_TEST_MSGS)
@@ -87,7 +87,7 @@ fn soak_message_transmission() {
 fn soak_reliable_message_transmission_with_terrible_network() {
     init_logger();
     let channel = 1;
-    let mut harness = TestHarness::new(JitterPipeConfig::very_very_bad());
+    let mut harness = MessageTestHarness::new(JitterPipeConfig::very_very_bad());
 
     let mut test_msgs = Vec::new();
     (0..NUM_TEST_MSGS).for_each(|_| test_msgs.push(random_payload_max_frags(MAX_FRAGMENTS)));
@@ -106,7 +106,7 @@ fn soak_reliable_message_transmission_with_terrible_network() {
                     unacked_sent_msg_ids.push(msg_id);
                     i += 1;
                 }
-                Err(PacketeerError::Backpressure(Backpressure::TooManyPending)) => {
+                Err(PicklebackError::Backpressure(Backpressure::TooManyPending)) => {
                     warn!("Backpressure");
                 }
                 Err(e) => panic!("Unhandled send error {e:?}"),

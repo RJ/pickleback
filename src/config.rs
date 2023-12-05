@@ -1,8 +1,8 @@
-use crate::message_reassembler::MAX_FRAGMENTS;
+use crate::MAX_FRAGMENTS;
 
 /// Various tunables. Mostly buffer sizes.
 #[derive(Clone)]
-pub struct PacketeerConfig {
+pub struct PicklebackConfig {
     /// Optionally specify buffer pool sizes and capacities.
     /// Default value of None will give sane defaults.
     pub buffer_pools_config: Option<Vec<crate::buffer_pool::PoolConfig>>,
@@ -48,7 +48,7 @@ pub struct PacketeerConfig {
     pub sent_frag_map_size: usize,
 }
 
-impl Default for PacketeerConfig {
+impl Default for PicklebackConfig {
     fn default() -> Self {
         Self {
             buffer_pools_config: None,

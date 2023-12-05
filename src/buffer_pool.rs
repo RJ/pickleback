@@ -11,7 +11,8 @@ pub struct PoolConfig {
     buffer_capacity: usize,
 }
 
-pub(crate) type BufHandle = RcRecycled<Vec<u8>>;
+/// A reference counted smart pointer to a pooled buffer, managed by Pickleback's Buffer Pool.
+pub type BufHandle = RcRecycled<Vec<u8>>;
 
 /// `BufPool` manages multiple pools of Vec<u8> buffers, with varying capacities.
 /// When you request a pooled buffer, you ask for something with a certain minimum capacity,
@@ -76,6 +77,15 @@ impl BufPool {
             .map(|config| (*config, Self::new_pool(config)))
             .collect::<Vec<_>>();
         Self { pools }
+    }
+
+    pub(crate) fn full_packets_only() -> Self {
+        let pools = vec![PoolConfig {
+            starting_size: 1,
+            max_size: 10,
+            buffer_capacity: 1500,
+        }];
+        Self::new(pools)
     }
 
     /// The empty pool always allocates a Vec with default capacity

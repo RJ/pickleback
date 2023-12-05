@@ -1,4 +1,4 @@
-use crate::PacketeerError;
+use crate::PicklebackError;
 /// SequenceBuffer as described here: https://gafferongames.com/post/packet_fragmentation_and_reassembly/
 ///
 /// Other similar implementations:
@@ -32,6 +32,16 @@ where
     }
 
     #[allow(unused)]
+    pub fn reset(&mut self) {
+        let size = self.entries.capacity();
+        self.entries.clear();
+        self.entry_sequences.clear();
+        self.entries.resize(size, T::default());
+        self.entry_sequences.resize(size, 0xFFFF_FFFF);
+        self.sequence = 0;
+    }
+
+    #[allow(unused)]
     fn type_name(&self) -> &str {
         std::any::type_name::<T>()
     }
@@ -57,9 +67,9 @@ where
         Some(&mut self.entries[index])
     }
 
-    pub fn insert(&mut self, sequence: u16, data: T) -> Result<&mut T, PacketeerError> {
+    pub fn insert(&mut self, sequence: u16, data: T) -> Result<&mut T, PicklebackError> {
         if Self::sequence_less_than(sequence, self.sequence.wrapping_sub(self.len() as u16)) {
-            return Err(PacketeerError::SequenceTooOld);
+            return Err(PicklebackError::SequenceTooOld);
         }
         if Self::sequence_greater_than(sequence, self.sequence) {
             let first_candidate = self.sequence.wrapping_add(1);

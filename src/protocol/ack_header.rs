@@ -1,11 +1,11 @@
-use crate::prelude::PacketeerError;
+use crate::prelude::PicklebackError;
 use crate::PacketId;
 use crate::ReceivedMeta;
 use crate::SequenceBuffer;
 use byteorder::{NetworkEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{Cursor, Write};
 
-pub(crate) const MAX_ACK_BYTES: u8 = 10; // MAX_ACK_BYTES*7 = num acks.
+pub(crate) const MAX_ACK_BYTES: u8 = 50; // MAX_ACK_BYTES*7 = num acks.
 pub(crate) const MAX_UNACKED_PACKETS: u16 = 7 * MAX_ACK_BYTES as u16;
 
 /// ack bitfield written like so:
@@ -56,8 +56,8 @@ impl Iterator for AckHeader {
         let b = self.bit_buffer[self.byte_offset as usize];
         let mask = 1_u8 << self.bit_offset;
         let is_acked = b & mask == mask;
-        let seq_offset = 7 * self.byte_offset + self.bit_offset;
-        let sequence = self.ack_id.0.wrapping_sub(seq_offset as u16);
+        let seq_offset = 7_u16 * self.byte_offset as u16 + self.bit_offset as u16;
+        let sequence = self.ack_id.0.wrapping_sub(seq_offset);
         if self.bit_offset == 6 {
             if (b & 0b10000000) != 0b10000000 {
                 // no continuation bit, ensure we terminate next time
@@ -81,7 +81,7 @@ impl AckHeader {
         2 + // ack_id u16
         self.num_bytes_needed as usize
     }
-    pub(crate) fn write(&self, writer: &mut impl Write) -> Result<usize, PacketeerError> {
+    pub(crate) fn write(&self, writer: &mut impl Write) -> Result<usize, PicklebackError> {
         writer.write_u16::<NetworkEndian>(self.ack_id.0)?;
         writer.write_all(&self.bit_buffer[..self.num_bytes_needed as usize])?;
         Ok(self.num_bytes_needed as usize + 2)
@@ -91,7 +91,7 @@ impl AckHeader {
     pub(crate) fn from_ack_iter(
         num_acks: u16,
         ack_iter: impl Iterator<Item = (u16, bool)>,
-    ) -> Result<Self, PacketeerError> {
+    ) -> Result<Self, PicklebackError> {
         let mut peekable_iter = ack_iter.peekable();
         // peek the first id, which is always the most recent ack, and gets written as a u16
         // all prior acks get 1 bit, the offset of which is relative to the first ack id.
@@ -127,7 +127,7 @@ impl AckHeader {
         })
     }
 
-    pub(crate) fn parse(reader: &mut Cursor<&[u8]>) -> Result<Self, PacketeerError> {
+    pub(crate) fn parse(reader: &mut Cursor<&[u8]>) -> Result<Self, PicklebackError> {
         let ack_id = PacketId(reader.read_u16::<NetworkEndian>()?);
         let mut bit_buffer = [0_u8; MAX_ACK_BYTES as usize];
         let mut writer = &mut bit_buffer[..];
