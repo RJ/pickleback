@@ -55,11 +55,10 @@ impl MessageDispatcher {
     }
 
     /// get the final messages for the consumer
-    pub(crate) fn drain_received_messages(
-        &mut self,
-        channel: u8,
-    ) -> std::vec::Drain<'_, ReceivedMessage> {
-        self.message_inbox.entry(channel).or_default().drain(..)
+    /// TODO are we returning PooledBuffers or what.. there is on inside Message.
+    /// or do we just show them a slice for immediate processing?
+    pub(crate) fn take_received_messages(&mut self, channel: u8) -> Vec<ReceivedMessage> {
+        std::mem::take(self.message_inbox.entry(channel).or_default())
     }
 
     /// get the acked  messages for the consumer
@@ -79,19 +78,29 @@ impl MessageDispatcher {
         Ok(())
     }
 
-    // updates ack_inbox with messages acked as a result of this packet being acks.
-    // informs channels of acks so they can cleanup
-    pub(crate) fn acked_packet(&mut self, packet_handle: PacketId, channel_list: &mut ChannelList) {
+    /// updates ack_inbox with messages acked as a result of this packet being acks.
+    /// informs channels of acks so they can cleanup
+    ///
+    /// returns now unused buffers, for returning to the pool
+    pub(crate) fn acked_packet(
+        &mut self,
+        packet_handle: PacketId,
+        channel_list: &mut ChannelList,
+    ) -> Vec<PooledBuffer> {
+        let mut returned_buffers = Vec::new();
         // check message handles that were just acked - if any are fragments, we need to log that
         // in the frag map, incase it results in a parent message id being acked (ie, all frag messages are now acked)
         if let Some(msg_handles) = self.messages_in_packets.remove(packet_handle.0) {
             trace!("Acked packet: {packet_handle:?} --> acked msgs: {msg_handles:?}");
             for msg_handle in &msg_handles {
                 // let channel know, so it doesn't retransmit this message:
-                channel_list
-                    .get_mut(msg_handle.channel)
-                    .unwrap()
-                    .message_ack_received(msg_handle);
+                returned_buffers.extend(
+                    channel_list
+                        .get_mut(msg_handle.channel)
+                        .unwrap()
+                        .message_ack_received(msg_handle)
+                        .into_iter(),
+                );
                 if let Some(parent_id) = msg_handle.parent_id() {
                     // fragment message
                     if self
@@ -114,11 +123,12 @@ impl MessageDispatcher {
                 }
             }
         }
+        returned_buffers
     }
 
     pub(crate) fn add_message_to_channel(
         &mut self,
-        pool: &BufPool,
+        pool: &mut BufPool,
         channel: &mut Channel,
         payload: &[u8],
     ) -> Result<MessageId, PicklebackError> {
@@ -133,7 +143,7 @@ impl MessageDispatcher {
 
     fn add_large_message_to_channel(
         &mut self,
-        pool: &BufPool,
+        pool: &mut BufPool,
         channel: &mut Channel,
         payload: &[u8],
     ) -> Result<MessageId, PicklebackError> {

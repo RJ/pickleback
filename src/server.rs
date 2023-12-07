@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    buffer_pool::{BufHandle, BufPool},
+    buffer_pool::BufPool,
     prelude::{PicklebackConfig, PicklebackError},
     PacketId, Pickleback,
 };
@@ -92,20 +92,18 @@ impl PicklebackServer {
     }
 
     /// Send all pending outbound packets for all clients
-    pub fn visit_packets_to_send(&mut self, mut send_fn: impl FnMut(SocketAddr, BufHandle)) {
+    pub fn visit_packets_to_send(&mut self, mut send_fn: impl FnMut(SocketAddr, &[u8])) {
         // the packets the server generates that don't belong to a (pending)client's pickleback:
         for AddressedPacket { address, packet } in self.outbox.drain(..) {
-            send_fn(address, packet);
+            send_fn(address, packet.as_ref());
         }
         for pc in &mut self.pending_clients {
             pc.pickleback
-                .drain_packets_to_send()
-                .for_each(|packet| send_fn(pc.socket_addr, packet));
+                .visit_packets_to_send(|packet| send_fn(pc.socket_addr, packet));
         }
         for cc in &mut self.connected_clients {
             cc.pickleback
-                .drain_packets_to_send()
-                .for_each(|packet| send_fn(cc.socket_addr, packet));
+                .visit_packets_to_send(|packet| send_fn(cc.socket_addr, packet));
         }
     }
 
@@ -286,7 +284,7 @@ impl PicklebackServer {
                 if protocol_version != PROTOCOL_VERSION {
                     log::warn!("Protocol version mismatch");
                     let denied = write_packet(
-                        &self.pool,
+                        &mut self.pool,
                         &self.config,
                         ProtocolPacket::ConnectionDenied(ConnectionDeniedPacket {
                             header: ProtocolPacketHeader::new(
@@ -300,8 +298,9 @@ impl PicklebackServer {
                     )?;
                     self.outbox.push_back(AddressedPacket {
                         address: client_addr,
-                        packet: denied,
+                        packet: (*denied).clone(),
                     });
+                    self.pool.return_buffer(denied);
                     return Ok(());
                 }
                 if let Some(_pending) = self.get_pending_by_client_salt(client_salt, client_addr) {
@@ -350,7 +349,7 @@ impl PicklebackServer {
                     self.connected_clients.push(cc);
                 } else {
                     let denied = write_packet(
-                        &self.pool,
+                        &mut self.pool,
                         &self.config,
                         ProtocolPacket::ConnectionDenied(ConnectionDeniedPacket {
                             header: ProtocolPacketHeader::new(
@@ -364,8 +363,9 @@ impl PicklebackServer {
                     )?;
                     self.outbox.push_back(AddressedPacket {
                         address: client_addr,
-                        packet: denied,
+                        packet: (*denied).clone(),
                     });
+                    self.pool.return_buffer(denied);
                 }
             }
 

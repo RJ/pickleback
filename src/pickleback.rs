@@ -1,3 +1,5 @@
+use std::ops::DerefMut;
+
 use crate::*;
 
 /// An instance of Pickleback represents one of the two endpoints at either side of a link
@@ -16,7 +18,7 @@ pub struct Pickleback {
     sent_buffer: SequenceBuffer<SentMeta>,
     received_buffer: SequenceBuffer<ReceivedMeta>,
     stats: PicklebackStats,
-    outbox: VecDeque<BufHandle>,
+    outbox: VecDeque<PooledBuffer>,
     pool: BufPool,
     xor_salt: Option<u64>,
 }
@@ -62,6 +64,10 @@ impl Pickleback {
         }
     }
 
+    /// reference to buffer pool. used for testing.
+    pub fn pool(&self) -> &BufPool {
+        &self.pool
+    }
     /*
     pub(crate) fn reset(&mut self) {
         self.rtt = 0.0;
@@ -113,23 +119,64 @@ impl Pickleback {
     ///
     /// If unable to write all packets, for whatever reason (for development..)
     ///
-    pub fn drain_packets_to_send(&mut self) -> std::collections::vec_deque::Drain<'_, BufHandle> {
+    // pub fn drain_packets_to_send(&mut self) -> std::collections::vec_deque::Drain<'_, BufHandle> {
+    //     match self.compose_packets() {
+    //         Ok(()) => self.outbox.drain(..),
+    //         Err(PicklebackError::Backpressure(bp)) => {
+    //             // Might have written some packets, but not all.
+    //             // still want to return the iterator.
+    //             // TODO This should be a reportable non-fatal condition of some sort.
+    //             warn!("[{}] Can't fully send this tick: {bp:?}", self.time);
+    //             self.outbox.drain(..)
+    //         }
+    //         Err(e) => panic!("error writing packets to send: {e:?}"),
+    //     }
+    // }
+
+    /// Consumes internal buffer of pending outbound packets, calling `send_fn` on each one.
+    ///
+    /// Call this and send packets to the other Pickleback endpoint via the network.
+    ///
+    /// # Panics
+    ///
+    /// If unable to write all packets, for whatever reason except backpressure.
+    ///
+    pub fn visit_packets_to_send(&mut self, mut send_fn: impl FnMut(&[u8])) {
         match self.compose_packets() {
-            Ok(()) => self.outbox.drain(..),
-            Err(PicklebackError::Backpressure(bp)) => {
-                // Might have written some packets, but not all.
-                // still want to return the iterator.
-                // TODO This should be a reportable non-fatal condition of some sort.
-                warn!("[{}] Can't fully send this tick: {bp:?}", self.time);
-                self.outbox.drain(..)
+            Ok(_) | Err(PicklebackError::Backpressure(_)) => {
+                // even if backpressure, *some* packets may have been written to the outbox
+                for packet in self.outbox.drain(..) {
+                    send_fn(packet.as_ref());
+                    self.pool.return_buffer(packet);
+                }
             }
-            Err(e) => panic!("error writing packets to send: {e:?}"),
+            Err(e) => {
+                panic!("Error writing packtes to send {e:?}");
+            }
         }
     }
 
-    /// Drains the list of received messages, which were parsed from received packets.
-    pub fn drain_received_messages(&mut self, channel: u8) -> std::vec::Drain<'_, ReceivedMessage> {
-        self.dispatcher.drain_received_messages(channel)
+    /// Clone packets in the outbound queue into a vec, instead of using the visitor pattern
+    /// via `visit_packets_to_send()` - this is just for unit tests.
+    pub fn collect_packets_to_send_inefficiently(&mut self) -> Vec<Vec<u8>> {
+        let mut ret = Vec::new();
+        self.visit_packets_to_send(|s| ret.push(s.to_vec()));
+        ret
+    }
+
+    /// How many packets are waiting in the outbound send queue.
+    ///
+    /// (You consume these using `visit_packets_to_send()`)
+    pub fn num_packets_to_send(&self) -> usize {
+        self.outbox.len()
+    }
+
+    /// Gives an iterator of received messages, which were parsed from received packets.
+    ///
+    /// Once iterator drops, pooled buffers within messages are returned to our pool.
+    pub fn drain_received_messages(&mut self, channel: u8) -> ReceivedMessagesContainer {
+        let messages = self.dispatcher.take_received_messages(channel);
+        ReceivedMessagesContainer::new(messages, &mut self.pool)
     }
 
     /// Drains the list of acked message ids.
@@ -172,7 +219,7 @@ impl Pickleback {
             return Err(PicklebackError::NoSuchChannel);
         };
         self.dispatcher
-            .add_message_to_channel(&self.pool, channel, message_payload)
+            .add_message_to_channel(&mut self.pool, channel, message_payload)
     }
 
     /// How many packets we've received that an ack hasn't been seen for yet.
@@ -246,7 +293,7 @@ impl Pickleback {
         let mut sent_something = false;
         let mut message_handles_in_packet = Vec::new();
         let max_packet_size = self.config.max_packet_size;
-        let mut packet: Option<BufHandle> = None;
+        let mut packet: Option<PooledBuffer> = None;
         // BufferLimitedWriter (which impls Write) wraps up `Cursor<&mut Vec<u8>>>` but limits how
         // many bytes can be written, and provides a .remaining() fn to query same.
         let mut writer: Option<BufferLimitedWriter> = None;
@@ -258,8 +305,9 @@ impl Pickleback {
                 if self.sent_unacked_packets() >= MAX_UNACKED_PACKETS {
                     return Err(PicklebackError::Backpressure(Backpressure::TooManyPending));
                 }
+                // this packet is returned to the buffer after `visit_packets_to_send` sees it.
                 packet = Some(self.pool.get_buffer(max_packet_size));
-                let cur = Cursor::new(packet.as_mut().unwrap().as_mut());
+                let cur = Cursor::new(packet.as_mut().unwrap().deref_mut());
                 writer = Some(BufferLimitedWriter::new(cur, max_packet_size));
                 self.write_packet_header(writer.as_mut().unwrap())?;
             }
@@ -332,15 +380,17 @@ impl Pickleback {
         if self.sent_unacked_packets() >= MAX_UNACKED_PACKETS {
             return Err(PicklebackError::Backpressure(Backpressure::TooManyPending));
         }
+        // this buffer is returned to the pool after the visit_packets_to_send sees it
         let mut packet = Some(self.pool.get_buffer(1300));
-        let mut cursor = Cursor::new(packet.as_mut().unwrap().as_mut());
+        let mut cursor = Cursor::new(packet.as_mut().unwrap().deref_mut());
         self.write_packet_header(&mut cursor)?;
         self.send_raw_packet(packet.take().unwrap())
     }
 
     /// Write a packet to a newly allocated buffer and send it.
     pub(crate) fn send_packet(&mut self, packet: ProtocolPacket) -> Result<(), PicklebackError> {
-        let buf = write_packet(&self.pool, &self.config, packet)?;
+        // write_packet gets a pooled buffer, which is returned once visited for sending
+        let buf = write_packet(&mut self.pool, &self.config, packet)?;
         self.send_raw_packet(buf)
     }
 
@@ -354,7 +404,7 @@ impl Pickleback {
     /// The BufHandle is for a packet with headers written, usually in `write_packets_to_send()`.
     ///
     /// The consumer code should fetch and dispatch it via whatever means they like.
-    fn send_raw_packet(&mut self, packet: BufHandle) -> Result<(), PicklebackError> {
+    fn send_raw_packet(&mut self, packet: PooledBuffer) -> Result<(), PicklebackError> {
         let send_size = packet.len() + self.config.packet_header_size;
         // received_buffer.sequence() is the most recent packet ack we're acknowledging reciept of in the
         // header of this packet we're about to send.
@@ -444,7 +494,8 @@ impl Pickleback {
         if matches!(header.packet_type, PacketType::Messages) {
             // as long as there are bytes left to read, we should only find whole messages
             while payload_reader.remaining() > 0 {
-                let msg = Message::parse(&self.pool, payload_reader)?;
+                // this gets a pooled buffer, and must be returned once consumer has seen message TODO
+                let msg = Message::parse(&mut self.pool, payload_reader)?;
                 self.stats.messages_received += 1;
                 info!("Parsed from packet: {msg:?}");
                 if let Some(channel) = self.channels.get_mut(msg.channel()) {
@@ -498,8 +549,12 @@ impl Pickleback {
                     self.stats.packets_acked += 1;
                     sent_data.acked = true;
                     // this allows the dispatcher to ack the messages that were sent in this packet
-                    self.dispatcher
+                    let returned_buffers = self
+                        .dispatcher
                         .acked_packet(PacketId(ack_sequence), &mut self.channels);
+                    for returned_buf in returned_buffers {
+                        self.pool.return_buffer(returned_buf);
+                    }
                     // update rtt calculations
                     let rtt: f32 = (self.time - sent_data.time) as f32 * 1000.0;
                     if (self.rtt == 0.0 && rtt > 0.0) || (self.rtt - rtt).abs() < 0.00001 {
@@ -592,7 +647,7 @@ mod tests {
         let payload = b"hello";
         let _msg_id = server.send_message(0, payload);
 
-        let to_send = server.drain_packets_to_send().collect::<Vec<_>>();
+        let to_send = server.collect_packets_to_send_inefficiently();
         assert_eq!(to_send.len(), 1);
 
         info!("Sending first copy of packet");
@@ -605,11 +660,12 @@ mod tests {
         };
         assert!(client.process_incoming_packet(&header, &mut cur).is_ok());
 
-        let rec = client.drain_received_messages(0).next().unwrap();
-        assert_eq!(rec.channel(), 0);
-
-        assert_eq!(rec.payload_to_owned().as_slice(), payload.as_ref());
-
+        {
+            let mut received_messages_container = client.drain_received_messages(0);
+            let rec = received_messages_container.next().unwrap();
+            assert_eq!(rec.channel(), 0);
+            assert_eq!(rec.payload_to_owned().as_slice(), payload.as_ref());
+        }
         // send dupe
         info!("Sending second (dupe) copy of packet");
         let mut cur = Cursor::new(to_send[0].as_slice());
@@ -644,8 +700,8 @@ mod tests {
         // to send anything else until it sees some acks.
         server.update(1.0);
         info!("Server sending to client..");
-        server.drain_packets_to_send().for_each(|packet| {
-            let mut cur = Cursor::new(packet.as_slice());
+        server.visit_packets_to_send(|packet| {
+            let mut cur = Cursor::new(packet);
             let ProtocolPacket::Messages(MessagesPacket { header, .. }) =
                 read_packet(&mut cur).unwrap()
             else {
@@ -666,8 +722,8 @@ mod tests {
             "Client sending to server.. sent_unacked is {}",
             client.sent_unacked_packets()
         );
-        client.drain_packets_to_send().for_each(|packet| {
-            let mut cur = Cursor::new(packet.as_slice());
+        client.visit_packets_to_send(|packet| {
+            let mut cur = Cursor::new(packet);
             let ProtocolPacket::Messages(MessagesPacket { header, .. }) =
                 read_packet(&mut cur).unwrap()
             else {
@@ -704,8 +760,8 @@ mod tests {
             client_sent.push(handle2);
 
             // forward packets to their endpoints
-            server.drain_packets_to_send().for_each(|packet| {
-                let mut cur = Cursor::new(packet.as_slice());
+            server.visit_packets_to_send(|packet| {
+                let mut cur = Cursor::new(packet);
                 let ProtocolPacket::Messages(MessagesPacket { header, .. }) =
                     read_packet(&mut cur).unwrap()
                 else {
@@ -724,8 +780,8 @@ mod tests {
                 );
             });
             assert!(!server.has_packets_to_send());
-            client.drain_packets_to_send().for_each(|packet| {
-                let mut cur = Cursor::new(packet.as_slice());
+            client.visit_packets_to_send(|packet| {
+                let mut cur = Cursor::new(packet);
                 let ProtocolPacket::Messages(MessagesPacket { header, .. }) =
                     read_packet(&mut cur).unwrap()
                 else {
@@ -836,10 +892,8 @@ mod tests {
 
         harness.advance(0.1);
 
-        let received_messages = harness
-            .client
-            .drain_received_messages(channel)
-            .collect::<Vec<_>>();
+        let received_messages_container = harness.client.drain_received_messages(channel);
+        let received_messages = received_messages_container.messages();
         assert_eq!(received_messages[0].payload_to_owned().as_slice(), msg1);
         assert_eq!(received_messages[1].payload_to_owned().as_slice(), msg2);
         assert_eq!(received_messages[2].payload_to_owned().as_slice(), msg3);
@@ -869,10 +923,8 @@ mod tests {
 
         harness.advance(0.1);
 
-        let received_messages = harness
-            .client
-            .drain_received_messages(channel)
-            .collect::<Vec<_>>();
+        let received_messages_container = harness.client.drain_received_messages(channel);
+        let received_messages = received_messages_container.messages();
         assert_eq!(received_messages.len(), 1);
         assert_eq!(received_messages[0].payload_to_owned().as_slice(), msg);
 
@@ -889,7 +941,7 @@ mod tests {
     #[test]
     fn reject_duplicate_messages() {
         crate::test_utils::init_logger();
-        let pool = BufPool::empty();
+        let mut pool = BufPool::empty();
         let channel = 0;
         let mut harness = MessageTestHarness::new(JitterPipeConfig::disabled());
         let payload = b"hello";
@@ -898,13 +950,13 @@ mod tests {
             .channels_mut()
             .get_mut(channel)
             .unwrap()
-            .enqueue_message(&pool, MessageId(123), payload, Fragmented::No);
+            .enqueue_message(&mut pool, MessageId(123), payload, Fragmented::No);
         harness
             .server
             .channels_mut()
             .get_mut(channel)
             .unwrap()
-            .enqueue_message(&pool, MessageId(123), payload, Fragmented::No);
+            .enqueue_message(&mut pool, MessageId(123), payload, Fragmented::No);
         harness.advance(1.);
         assert_eq!(harness.client.drain_received_messages(channel).len(), 1);
     }
@@ -923,20 +975,20 @@ mod tests {
             .unwrap();
         // drop second packet (index 1), which will be the second of the two fragments.
         harness.advance_with_server_outbound_drops(0.05, vec![1]);
-        assert!(harness.collect_client_messages(channel).is_empty());
+        assert!(harness.drain_client_messages(channel).is_empty());
         assert!(harness.collect_server_acks(channel).is_empty());
         // retransmit not ready yet
         harness.advance(0.01);
-        assert!(harness.collect_client_messages(channel).is_empty());
+        assert!(harness.drain_client_messages(channel).is_empty());
         assert!(harness.collect_server_acks(channel).is_empty());
         // should retransmit
         harness.advance(0.09001); // retransmit time of 0.1 reached
-        assert_eq!(harness.collect_client_messages(channel).len(), 1);
+        assert_eq!(harness.drain_client_messages(channel).len(), 1);
         assert_eq!(vec![id], harness.collect_server_acks(channel));
         // ensure server finished sending:
         harness.advance(1.0);
         // this is testing that the server is only transmitting one small "empty" packet (just headers)
-        let to_send = harness.server.drain_packets_to_send().collect::<Vec<_>>();
+        let to_send = harness.server.collect_packets_to_send_inefficiently();
         assert_eq!(1, to_send.len());
         // both our fragments are def bigger than 50:
         assert!(to_send[0].len() < 50);

@@ -51,10 +51,7 @@ fn soak_message_transmission() {
 
         harness.advance(0.03);
 
-        let client_received_messages = harness
-            .client
-            .drain_received_messages(channel)
-            .collect::<Vec<_>>();
+        let mut container = harness.client.drain_received_messages(channel);
 
         // acks not guaranteed to be reported in same order they were sent - using hashset.
         let acks = harness
@@ -63,12 +60,12 @@ fn soak_message_transmission() {
             .collect::<HashSet<_>>();
 
         assert_eq!(
-            client_received_messages.len(),
+            container.len(),
             num_sent,
             "didn't receive all the messages sent this tick"
         );
 
-        for recv_msg in client_received_messages.iter() {
+        while let Some(recv_msg) = container.next() {
             let rec = recv_msg.payload_to_owned();
             if let Some(expected_id) = in_flight_msgs.get(&rec) {
                 assert_eq!(*expected_id, recv_msg.id(), "ids don't match");
@@ -89,12 +86,15 @@ fn soak_reliable_message_transmission_with_terrible_network() {
     let channel = 1;
     let mut harness = MessageTestHarness::new(JitterPipeConfig::very_very_bad());
 
+    log::warn!("server pools: \n{:?}", harness.server.pool());
+    log::warn!("client pools: \n{:?}", harness.client.pool());
+
     let mut test_msgs = Vec::new();
     (0..NUM_TEST_MSGS).for_each(|_| test_msgs.push(random_payload_max_frags(MAX_FRAGMENTS)));
 
     let mut unacked_sent_msg_ids = Vec::new();
 
-    let mut client_received_messages = Vec::new();
+    let mut num_client_received_messages = 0;
 
     let mut i = 0;
     while i < NUM_TEST_MSGS + NUM_EXTRA_ITERATIONS {
@@ -122,7 +122,7 @@ fn soak_reliable_message_transmission_with_terrible_network() {
             unacked_sent_msg_ids.retain(|id| !acked_ids.contains(id));
         }
 
-        client_received_messages.extend(harness.client.drain_received_messages(channel));
+        num_client_received_messages += harness.client.drain_received_messages(channel).len();
     }
 
     assert_eq!(
@@ -132,7 +132,7 @@ fn soak_reliable_message_transmission_with_terrible_network() {
     );
 
     // with enough extra iterations, resends should have ensured everything was received.
-    assert_eq!(client_received_messages.len(), test_msgs.len());
+    assert_eq!(num_client_received_messages, test_msgs.len());
 
     // Testing the test harness here for good measure.
     //
@@ -157,4 +157,7 @@ fn soak_reliable_message_transmission_with_terrible_network() {
     println!("Client Packet loss: {}", harness.client.packet_loss());
     println!("Client RTT: {}", harness.client.rtt());
     println!("Test harness transmission stats: {:?}", harness.stats);
+
+    log::warn!("server pools: \n{:?}", harness.server.pool());
+    log::warn!("client pools: \n{:?}", harness.client.pool());
 }
