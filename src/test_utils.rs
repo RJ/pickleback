@@ -11,7 +11,7 @@ use crate::*;
 pub fn init_logger() {
     let _ = env_logger::builder()
         .write_style(env_logger::WriteStyle::Always)
-        .is_test(true)
+        // .is_test(true)
         .try_init();
 }
 
@@ -40,16 +40,16 @@ pub struct TransmissionStats {
 pub struct MessageTestHarness {
     pub server: Pickleback,
     pub client: Pickleback,
-    pub server_jitter_pipe: JitterPipe<BufHandle>,
-    pub client_jitter_pipe: JitterPipe<BufHandle>,
+    pub server_jitter_pipe: JitterPipe<Vec<u8>>,
+    pub client_jitter_pipe: JitterPipe<Vec<u8>>,
     server_drop_indices: Option<Vec<u32>>,
     pub stats: TransmissionStats,
     pool: BufPool,
 }
 impl MessageTestHarness {
     pub fn new(config: JitterPipeConfig) -> Self {
-        let server_jitter_pipe = JitterPipe::<BufHandle>::new(config.clone());
-        let client_jitter_pipe = JitterPipe::<BufHandle>::new(config);
+        let server_jitter_pipe = JitterPipe::<Vec<u8>>::new(config.clone());
+        let client_jitter_pipe = JitterPipe::<Vec<u8>>::new(config);
         let mut server = Pickleback::default();
         let mut client = Pickleback::default();
         server.set_xor_salt(Some(0));
@@ -72,15 +72,11 @@ impl MessageTestHarness {
     pub fn collect_server_acks(&mut self, channel: u8) -> Vec<MessageId> {
         self.server.drain_message_acks(channel).collect::<Vec<_>>()
     }
-    pub fn collect_client_messages(&mut self, channel: u8) -> Vec<ReceivedMessage> {
-        self.client
-            .drain_received_messages(channel)
-            .collect::<Vec<_>>()
+    pub fn drain_client_messages(&mut self, channel: u8) -> ReceivedMessagesContainer {
+        self.client.drain_received_messages(channel)
     }
-    pub fn collect_server_messages(&mut self, channel: u8) -> Vec<ReceivedMessage> {
-        self.server
-            .drain_received_messages(channel)
-            .collect::<Vec<_>>()
+    pub fn drain_server_messages(&mut self, channel: u8) -> ReceivedMessagesContainer {
+        self.server.drain_received_messages(channel)
     }
 
     /// advances but any packets with specific indexes the server sends are lost
@@ -115,15 +111,13 @@ impl MessageTestHarness {
         let server_drop_indices = self.server_drop_indices.as_ref().unwrap_or(&empty);
 
         trace!("🟡 server -> compose and send packets");
-        let server_sent = self
-            .server
-            .drain_packets_to_send()
-            .fold(0_u32, |acc, packet| {
-                if !server_drop_indices.contains(&acc) {
-                    self.server_jitter_pipe.insert(packet);
-                }
-                acc + 1
-            });
+        let mut server_sent = 0;
+        self.server.visit_packets_to_send(|packet| {
+            if !server_drop_indices.contains(&server_sent) {
+                self.server_jitter_pipe.insert(packet.to_vec());
+            }
+            server_sent += 1;
+        });
 
         trace!("🟠 client -> process incoming packets");
         let mut client_received = 0;
@@ -140,9 +134,10 @@ impl MessageTestHarness {
         }
 
         trace!("🟠 client -> compose and send packets");
-        let client_sent = self.client.drain_packets_to_send().fold(0, |acc, packet| {
-            self.client_jitter_pipe.insert(packet);
-            acc + 1
+        let mut client_sent = 0;
+        self.client.visit_packets_to_send(|packet| {
+            self.client_jitter_pipe.insert(packet.to_vec());
+            client_sent += 1;
         });
 
         trace!("🟡 server -> process incoming packets");
@@ -248,10 +243,12 @@ impl ProtocolTestHarness {
         trace!("🟡 server -> compose and send packets");
         let mut server_sent = 0;
         self.server
-            .visit_packets_to_send(|address: SocketAddr, packet: BufHandle| {
+            .visit_packets_to_send(|address: SocketAddr, packet: &[u8]| {
                 if !server_drop_indices.contains(&server_sent) {
-                    self.server_jitter_pipe
-                        .insert(AddressedPacket { address, packet });
+                    self.server_jitter_pipe.insert(AddressedPacket {
+                        address,
+                        packet: packet.to_vec(),
+                    });
                 }
                 server_sent += 1;
             });
@@ -265,9 +262,11 @@ impl ProtocolTestHarness {
         trace!("🟠 client -> compose and send packets");
         let client_sent = 0;
         self.client
-            .visit_packets_to_send(|address: SocketAddr, packet: BufHandle| {
-                self.client_jitter_pipe
-                    .insert(AddressedPacket { address, packet });
+            .visit_packets_to_send(|address: SocketAddr, packet: &[u8]| {
+                self.client_jitter_pipe.insert(AddressedPacket {
+                    address,
+                    packet: packet.to_vec(),
+                });
 
                 server_sent += 1;
             });

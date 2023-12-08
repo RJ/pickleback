@@ -1,5 +1,5 @@
 use crate::{
-    buffer_pool::{BufHandle, BufPool},
+    buffer_pool::{BufPool, PooledBuffer},
     cursor::CursorExtras,
     MessageId, PicklebackError,
 };
@@ -100,7 +100,7 @@ pub struct Message {
     id: MessageId,
     size_mode: MessageSizeMode,
     channel: u8,
-    buffer: BufHandle,
+    buffer: PooledBuffer,
     fragment: Option<Fragment>,
 }
 
@@ -132,7 +132,7 @@ impl Message {
     /// Creates a new message, allocates a buffer from the pool, and writes headers and payload to
     /// the buffer immediately.
     pub(crate) fn new_outbound(
-        pool: &BufPool,
+        pool: &mut BufPool,
         id: MessageId,
         channel: u8,
         payload: &[u8],
@@ -148,6 +148,11 @@ impl Message {
             Fragmented::Yes(f) => Some(f),
         };
         let mut buf = pool.get_buffer(header_size + payload.len());
+        log::warn!(
+            "new_outbound buffer = '{buf:?}' min_size: {} cap: {}",
+            header_size + payload.len(),
+            buf.capacity()
+        );
         let mut writer = Cursor::new(&mut *buf);
         Self::write_headers(
             &mut writer,
@@ -181,6 +186,12 @@ impl Message {
         }
         // message id
         + 2
+    }
+
+    /// Takes the buffer, leaving a default empty one.
+    /// used when message is finished with, to return buffer to pool.
+    pub(crate) fn take_buffer(&mut self) -> PooledBuffer {
+        std::mem::take(&mut self.buffer)
     }
 
     pub(crate) fn fragment(&self) -> Option<&Fragment> {
@@ -268,7 +279,7 @@ impl Message {
         Ok(())
     }
 
-    pub fn parse(pool: &BufPool, reader: &mut Cursor<&[u8]>) -> Result<Self, PicklebackError> {
+    pub fn parse(pool: &mut BufPool, reader: &mut Cursor<&[u8]>) -> Result<Self, PicklebackError> {
         let prefix_byte = reader.read_u8()?;
         let fragmented = prefix_byte & 1 != 0;
         let size_mode = if prefix_byte & (1 << 1) != 0 {
@@ -315,21 +326,26 @@ mod tests {
     #[test]
     fn message_serialization() {
         crate::test_utils::init_logger();
-        let pool = BufPool::empty();
+        let mut pool = BufPool::empty();
 
         let payload1 = b"HELLO";
         let payload2 = b"FRAGMENTED";
         let payload3 = b"WORLD";
-        let msg1 = Message::new_outbound(&pool, MessageId(1), 1, payload1, Fragmented::No);
+        let msg1 = Message::new_outbound(&mut pool, MessageId(1), 1, payload1, Fragmented::No);
         // the last fragment can be a small msg that rides along with other unfragmented messages:
         let fragment = Fragment {
             index: 0,
             num_fragments: 1,
             parent_id: MessageId(1),
         };
-        let msg2 =
-            Message::new_outbound(&pool, MessageId(3), 5, payload2, Fragmented::Yes(fragment));
-        let msg3 = Message::new_outbound(&pool, MessageId(2), 16, payload3, Fragmented::No);
+        let msg2 = Message::new_outbound(
+            &mut pool,
+            MessageId(3),
+            5,
+            payload2,
+            Fragmented::Yes(fragment),
+        );
+        let msg3 = Message::new_outbound(&mut pool, MessageId(2), 16, payload3, Fragmented::No);
 
         let mut buffer = Vec::with_capacity(1500);
         buffer.extend_from_slice(msg1.as_slice());
@@ -339,9 +355,9 @@ mod tests {
         let incoming = Vec::from(buffer.as_slice());
         let mut cur = Cursor::new(incoming.as_ref());
 
-        let recv_msg1 = Message::parse(&pool, &mut cur).unwrap();
-        let recv_msg2 = Message::parse(&pool, &mut cur).unwrap();
-        let recv_msg3 = Message::parse(&pool, &mut cur).unwrap();
+        let recv_msg1 = Message::parse(&mut pool, &mut cur).unwrap();
+        let recv_msg2 = Message::parse(&mut pool, &mut cur).unwrap();
+        let recv_msg3 = Message::parse(&mut pool, &mut cur).unwrap();
 
         assert_eq!(cur.position(), incoming.len() as u64);
 
@@ -365,7 +381,7 @@ mod tests {
     #[test]
     fn fragment_message_serialization() {
         crate::test_utils::init_logger();
-        let pool = BufPool::empty();
+        let mut pool = BufPool::empty();
 
         // fragment messages (except the last) have a fixed size of 1024 bytes
         let payload = &[41; 1024];
@@ -374,14 +390,20 @@ mod tests {
             num_fragments: 10,
             parent_id: MessageId(1),
         };
-        let msg = Message::new_outbound(&pool, MessageId(0), 0, payload, Fragmented::Yes(fragment));
+        let msg = Message::new_outbound(
+            &mut pool,
+            MessageId(0),
+            0,
+            payload,
+            Fragmented::Yes(fragment),
+        );
 
         let mut buffer = Vec::with_capacity(1500);
         buffer.extend_from_slice(msg.as_slice());
 
         let mut incoming = Cursor::new(buffer.as_ref());
 
-        let recv_msg = Message::parse(&pool, &mut incoming).unwrap();
+        let recv_msg = Message::parse(&mut pool, &mut incoming).unwrap();
 
         assert_eq!(incoming.position(), buffer.len() as u64);
 

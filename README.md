@@ -47,6 +47,7 @@ be sent in each direction at least 10 times a second even if there are no explic
 ## Example
 
 ```rust
+/*
 use pickleback::prelude::*;
 
 let config = PicklebackConfig::default();
@@ -62,13 +63,13 @@ fn transmit_packets(server: &mut PicklebackServer, client: &mut  PicklebackClien
     // Server --> Client
     {
         server.update(0.1);
-        let mut send_to_client = |address, packet: BufHandle| {client.receive(packet.as_slice(), address); };
+        let mut send_to_client = |address, packet| {client.receive(packet, address); };
         server.visit_packets_to_send(&mut send_to_client);
     }
     // Client --> Server
     {
         client.update(0.1);
-        let mut send_to_server = |address, packet: BufHandle| {server.receive(packet.as_slice(), address); };
+        let mut send_to_server = |address, packet| {server.receive(packet, address); };
         client.visit_packets_to_send(&mut send_to_server);
     }
 }
@@ -115,6 +116,7 @@ transmit_packets(&mut server, &mut client);
 let mut connected_client = server.connected_clients_mut().next().unwrap();
 // TODO: don't expose pickleback via connected_client, proxy a couple of fns and document..
 assert_eq!(vec![msg_id], connected_client.pickleback.drain_message_acks(channel).collect::<Vec<_>>());
+*/
 ```
 
 ## Protocol Overview

@@ -11,13 +11,14 @@ pub(crate) trait ChannelT {
     /// enqueue a message to be sent in an outbound packet
     fn enqueue_message(
         &mut self,
-        pool: &BufPool,
+        pool: &mut BufPool,
         id: MessageId,
         payload: &[u8],
         fragmented: Fragmented,
     );
-    /// called when a message has been acked by the packet layer
-    fn message_ack_received(&mut self, msg_handle: &MessageHandle);
+    /// called when a message has been acked by the packet layer.
+    /// returns now unused buffers, so they can be returned to the pool
+    fn message_ack_received(&mut self, msg_handle: &MessageHandle) -> Vec<PooledBuffer>;
     /// get message ready to be coalesced into an outbound packet
     fn get_message_to_write_to_a_packet(&mut self, max_size: usize) -> Option<Message>;
     // false if we've already fully received this message id, or it's known to be stale/useless
@@ -73,11 +74,13 @@ impl ChannelT for UnreliableChannel {
     }
     fn enqueue_message(
         &mut self,
-        pool: &BufPool,
+        pool: &mut BufPool,
         id: MessageId,
         payload: &[u8],
         fragmented: Fragmented,
     ) {
+        // this gets a pooled buffer for the message.
+        // buffer is returned to pool once written to packet in `get_message_to_write_to_a_packet()`
         let msg = Message::new_outbound(pool, id, self.id(), payload, fragmented);
         info!(">>>>> unreliable chan enq msg: {msg:?}");
         self.q.push_back(msg);
@@ -88,7 +91,10 @@ impl ChannelT for UnreliableChannel {
     fn id(&self) -> u8 {
         self.id
     }
-    fn message_ack_received(&mut self, _handle: &MessageHandle) {}
+    fn message_ack_received(&mut self, _handle: &MessageHandle) -> Vec<PooledBuffer> {
+        // buffers are already returned to the pool immediately after writing to a packet.
+        Vec::new()
+    }
     // this removes after returning, but a reliable queue shouldn't until acked.
     fn get_message_to_write_to_a_packet(&mut self, max_size: usize) -> Option<Message> {
         for index in 0..self.q.len() {
@@ -112,6 +118,10 @@ impl ResendableMessage {
             last_sent: None,
         }
     }
+    fn message_mut(&mut self) -> &mut Message {
+        &mut self.message
+    }
+
     fn is_ready(&self, now: f64, cutoff: f64) -> bool {
         if self.last_sent.is_none() || (now - self.last_sent.unwrap()) >= cutoff {
             return true;
@@ -176,11 +186,12 @@ impl ChannelT for ReliableChannel {
     }
     fn enqueue_message(
         &mut self,
-        pool: &BufPool,
+        pool: &mut BufPool,
         id: MessageId,
         payload: &[u8],
         fragmented: Fragmented,
     ) {
+        // this gets a new pooled buffer from the pool - it's returned once message is acked
         let msg = Message::new_outbound(pool, id, self.id(), payload, fragmented);
         self.q.push_back(ResendableMessage::new(msg));
     }
@@ -192,8 +203,21 @@ impl ChannelT for ReliableChannel {
     fn id(&self) -> u8 {
         self.id
     }
-    fn message_ack_received(&mut self, msg_handle: &MessageHandle) {
-        self.q.retain(|m| !m.dismissed_by_ack(msg_handle));
+    /// removes message(s) acked by this handle.
+    /// can remove multiple, if am acked message comprised multiple fragment messages.
+    ///
+    /// Returns any now-unused pooled buffers, for returning to the pool
+    fn message_ack_received(&mut self, msg_handle: &MessageHandle) -> Vec<PooledBuffer> {
+        let mut buffers = Vec::new();
+        self.q.retain_mut(|re_msg| {
+            if re_msg.dismissed_by_ack(msg_handle) {
+                buffers.push(re_msg.message_mut().take_buffer());
+                false
+            } else {
+                true
+            }
+        });
+        buffers
     }
     // this leaves the messges in the queue until acked, but updates their last_sent time.
     fn get_message_to_write_to_a_packet(&mut self, max_size: usize) -> Option<Message> {
@@ -225,10 +249,10 @@ mod tests {
     #[test]
     fn unreliable_channel() {
         crate::test_utils::init_logger();
-        let pool = BufPool::empty();
+        let mut pool = BufPool::empty();
         let mut channel = UnreliableChannel::new(0, 1.0);
         let payload = b"hello";
-        channel.enqueue_message(&pool, MessageId(0), payload, Fragmented::No);
+        channel.enqueue_message(&mut pool, MessageId(0), payload, Fragmented::No);
         assert!(channel.any_ready_to_send());
         assert!(channel.get_message_to_write_to_a_packet(999999).is_some());
         channel.update(1.0);
@@ -238,12 +262,12 @@ mod tests {
     #[test]
     fn reliable_channel() {
         crate::test_utils::init_logger();
-        let pool = BufPool::empty();
+        let mut pool = BufPool::empty();
         let channel_id = 0;
         let mut channel = ReliableChannel::new(channel_id, 1.0);
         let payload = b"hello";
         let message_id = MessageId(123);
-        channel.enqueue_message(&pool, message_id, payload, Fragmented::No);
+        channel.enqueue_message(&mut pool, message_id, payload, Fragmented::No);
         assert!(channel.any_ready_to_send());
         assert!(channel.get_message_to_write_to_a_packet(999999).is_some());
         // not empty, because non-acked

@@ -1,6 +1,6 @@
 use super::AckHeader;
 use crate::{
-    buffer_pool::{BufHandle, BufPool},
+    buffer_pool::{BufPool, PooledBuffer},
     cursor::{BufferLimitedWriter, CursorExtras},
     prelude::PicklebackConfig,
     PacketId, PicklebackError,
@@ -16,7 +16,7 @@ use super::DisconnectReason;
 #[derive(Clone, Eq, PartialEq)]
 pub struct AddressedPacket {
     pub address: SocketAddr,
-    pub packet: BufHandle,
+    pub packet: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -241,10 +241,10 @@ pub(crate) fn write_zero_bytes<W: Write>(writer: &mut W, num_bytes: usize) -> st
 }
 
 pub(crate) fn write_packet(
-    pool: &BufPool,
+    pool: &mut BufPool,
     config: &PicklebackConfig,
     packet: ProtocolPacket,
-) -> Result<BufHandle, PicklebackError> {
+) -> Result<PooledBuffer, PicklebackError> {
     let max_packet_size = config.max_packet_size;
     let mut buffer = pool.get_buffer(max_packet_size);
     let mut writer = BufferLimitedWriter::new(Cursor::new(&mut buffer), max_packet_size);

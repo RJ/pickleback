@@ -88,3 +88,58 @@ impl ReceivedMessage {
         ret
     }
 }
+
+/// Not-quite-an-iterator: owns messages, yields references, and returns pooled buffers to the
+/// pool once it drops.
+pub struct ReceivedMessagesContainer<'pool> {
+    next_index: usize,
+    messages: Vec<ReceivedMessage>,
+    pool: &'pool mut BufPool,
+}
+
+impl<'pool> ReceivedMessagesContainer<'pool> {
+    pub fn new(messages: Vec<ReceivedMessage>, pool: &'pool mut BufPool) -> Self {
+        Self {
+            messages,
+            pool,
+            next_index: 0,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.messages.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn next(&mut self) -> Option<&ReceivedMessage> {
+        if self.next_index == self.messages.len() {
+            None
+        } else {
+            let i = self.next_index;
+            self.next_index += 1;
+            Some(&self.messages[i])
+        }
+    }
+
+    pub fn messages(&self) -> &Vec<ReceivedMessage> {
+        &self.messages
+    }
+}
+
+impl<'pool> Drop for ReceivedMessagesContainer<'pool> {
+    fn drop(&mut self) {
+        for recv_msg in self.messages.drain(..) {
+            match recv_msg.message_type {
+                ReceivedMessageType::Single(mut msg) => self.pool.return_buffer(msg.take_buffer()),
+                ReceivedMessageType::Fragmented(msgs) => {
+                    for mut msg in msgs {
+                        self.pool.return_buffer(msg.take_buffer())
+                    }
+                }
+            }
+        }
+    }
+}

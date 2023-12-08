@@ -1,7 +1,7 @@
 use std::{io::Cursor, net::SocketAddr};
 
 use crate::{
-    buffer_pool::BufHandle,
+    // buffer_pool::BufHandle,
     prelude::{PicklebackConfig, PicklebackError},
     Pickleback,
 };
@@ -67,7 +67,7 @@ impl PicklebackClient {
     }
 
     /// Gives an iterator of new messages received by this client
-    pub fn drain_received_messages(&mut self, channel: u8) -> std::vec::Drain<'_, ReceivedMessage> {
+    pub fn drain_received_messages(&mut self, channel: u8) -> ReceivedMessagesContainer {
         self.pickleback.drain_received_messages(channel)
     }
 
@@ -147,7 +147,7 @@ impl PicklebackClient {
     ///
     /// # Panics
     /// Only on internal logic errors
-    pub fn visit_packets_to_send(&mut self, mut send_fn: impl FnMut(SocketAddr, BufHandle)) {
+    pub fn visit_packets_to_send(&mut self, mut send_fn: impl FnMut(SocketAddr, &[u8])) {
         let Some(server_addr) = self.server_addr else {
             return;
         };
@@ -216,7 +216,7 @@ impl PicklebackClient {
         }
         let mut sent = 0;
 
-        self.pickleback.drain_packets_to_send().for_each(|packet| {
+        self.pickleback.visit_packets_to_send(|packet| {
             send_fn(server_addr, packet);
             sent += 1;
         });
@@ -235,9 +235,10 @@ impl PicklebackClient {
                 });
                 let _ = self.send(keepalive);
             }
-            self.pickleback
-                .drain_packets_to_send()
-                .for_each(|packet| send_fn(server_addr, packet));
+            self.pickleback.visit_packets_to_send(|packet| {
+                send_fn(server_addr, packet);
+                sent += 1;
+            });
         }
     }
 
