@@ -47,7 +47,6 @@ be sent in each direction at least 10 times a second even if there are no explic
 ## Example
 
 ```rust
-/*
 use pickleback::prelude::*;
 
 let config = PicklebackConfig::default();
@@ -61,17 +60,11 @@ client.connect("127.0.0.1:0");
 // in lieu of sending over a network, deliver directly:
 fn transmit_packets(server: &mut PicklebackServer, client: &mut  PicklebackClient) {
     // Server --> Client
-    {
-        server.update(0.1);
-        let mut send_to_client = |address, packet| {client.receive(packet, address); };
-        server.visit_packets_to_send(&mut send_to_client);
-    }
+    server.update(0.1);
+    server.visit_packets_to_send(|address, packet| {client.receive(packet, address); });
     // Client --> Server
-    {
-        client.update(0.1);
-        let mut send_to_server = |address, packet| {server.receive(packet, address); };
-        client.visit_packets_to_send(&mut send_to_server);
-    }
+    client.update(0.1);
+    client.visit_packets_to_send(|address, packet| {server.receive(packet, address); });
 }
 
 // need to have some back-and-forth here to finish handshaking
@@ -101,12 +94,13 @@ let msg_id = {
 transmit_packets(&mut server, &mut client);
 
 // client will have received a message:
-let received = client.drain_received_messages(channel).collect::<Vec<_>>();
+let mut received = client.drain_received_messages(channel);
 assert_eq!(received.len(), 1);
 // normally you'd use the .payload() to get a Reader, rather than .payload_to_owned()
 // which reads it into a Vec. But a vec here makes it easier to test.
-let recv_payload = received[0].payload_to_owned();
+let recv_payload = received.next().unwrap().payload_to_owned();
 assert_eq!(b"hello".to_vec(), recv_payload);
+drop(received);
 
 // if the client doesn't have a message payload to send, it will still send
 // a packet here just to transmit acks
@@ -116,7 +110,6 @@ transmit_packets(&mut server, &mut client);
 let mut connected_client = server.connected_clients_mut().next().unwrap();
 // TODO: don't expose pickleback via connected_client, proxy a couple of fns and document..
 assert_eq!(vec![msg_id], connected_client.pickleback.drain_message_acks(channel).collect::<Vec<_>>());
-*/
 ```
 
 ## Protocol Overview
