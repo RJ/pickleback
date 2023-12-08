@@ -178,7 +178,7 @@ impl BufPool {
         for (config, pool) in self.pools.iter_mut() {
             if config.buffer_capacity >= min_size || config.buffer_capacity == 0 {
                 let ret = pool.checkout();
-                log::warn!("🎱 Getting buffer for {min_size}: {ret:?}");
+                log::trace!("🎱 Getting buffer for {min_size}: {ret:?}");
                 return ret;
             }
         }
@@ -190,7 +190,7 @@ impl BufPool {
     /// Checks the buffer back in to the pool so it can be reused
     pub(crate) fn return_buffer(&mut self, buffer: PooledBuffer) {
         let min_size = buffer.capacity();
-        log::warn!("🎱 Returning buffer of size: {} = {buffer:?}", buffer.len());
+        log::trace!("🎱 Returning buffer of size: {} = {buffer:?}", buffer.len());
         for (config, pool) in self.pools.iter_mut() {
             if config.buffer_capacity >= min_size || config.buffer_capacity == 0 {
                 pool.checkin(buffer);

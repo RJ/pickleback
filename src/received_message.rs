@@ -131,7 +131,6 @@ impl<'pool> ReceivedMessagesContainer<'pool> {
 
 impl<'pool> Drop for ReceivedMessagesContainer<'pool> {
     fn drop(&mut self) {
-        log::warn!("Dropping received message iter!");
         for recv_msg in self.messages.drain(..) {
             match recv_msg.message_type {
                 ReceivedMessageType::Single(mut msg) => self.pool.return_buffer(msg.take_buffer()),
