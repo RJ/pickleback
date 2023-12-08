@@ -13,42 +13,23 @@ pub struct PoolConfig {
 
 /// A newtype of Vec<u8> representing a reusable buffer that should be returned to the pool
 #[derive(Clone, Default)]
-pub(crate) struct PooledBuffer {
-    v: Vec<u8>,
-    id: u32,
-}
+pub(crate) struct PooledBuffer(Vec<u8>);
 
 impl std::fmt::Debug for PooledBuffer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "PooledBuffer{{id:{}, capacity:{}}}",
-            self.id,
-            self.v.capacity()
-        )
-    }
-}
-
-impl PooledBuffer {
-    pub(crate) fn new(id: u32, v: Vec<u8>) -> Self {
-        Self { v, id }
-    }
-
-    #[allow(unused)]
-    pub(crate) fn id(&self) -> u32 {
-        self.id
+        write!(f, "PooledBuffer{{capacity:{}}}", self.0.capacity())
     }
 }
 
 impl Deref for PooledBuffer {
     type Target = Vec<u8>;
     fn deref(&self) -> &Self::Target {
-        &self.v
+        &self.0
     }
 }
 impl DerefMut for PooledBuffer {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.v
+        &mut self.0
     }
 }
 
@@ -57,7 +38,6 @@ pub(crate) struct Pool {
     config: PoolConfig,
     overflow_allocations: usize,
     discarded_checkins: usize,
-    allocation_seq: u32,
 }
 
 impl std::fmt::Debug for Pool {
@@ -65,7 +45,6 @@ impl std::fmt::Debug for Pool {
         f.debug_struct("Pool")
             .field("overflow_allocations", &self.overflow_allocations)
             .field("discarded_checkins", &self.discarded_checkins)
-            .field("allocation_seq", &self.allocation_seq)
             .field("buffers_len", &self.buffers.len())
             .field("config", &self.config)
             .finish()
@@ -75,18 +54,16 @@ impl std::fmt::Debug for Pool {
 impl Pool {
     fn new(config: PoolConfig) -> Self {
         let mut buffers = Vec::with_capacity(config.starting_size);
-        for id in 0..config.starting_size {
-            buffers.push(PooledBuffer::new(
-                id as u32,
-                Vec::<u8>::with_capacity(config.buffer_capacity),
-            ));
+        for _ in 0..config.starting_size {
+            buffers.push(PooledBuffer(Vec::<u8>::with_capacity(
+                config.buffer_capacity,
+            )));
         }
         Self {
             buffers,
             config,
             overflow_allocations: 0,
             discarded_checkins: 0,
-            allocation_seq: config.starting_size as u32,
         }
     }
     fn checkout(&mut self) -> PooledBuffer {
@@ -95,11 +72,7 @@ impl Pool {
             existing
         } else {
             self.overflow_allocations += 1;
-            self.allocation_seq += 1;
-            PooledBuffer::new(
-                self.allocation_seq,
-                Vec::<u8>::with_capacity(self.config.buffer_capacity),
-            )
+            PooledBuffer(Vec::<u8>::with_capacity(self.config.buffer_capacity))
         }
     }
     fn checkin(&mut self, buffer: PooledBuffer) {
@@ -139,36 +112,30 @@ impl Default for BufPool {
         let configs = vec![
             PoolConfig {
                 starting_size: 1000,
-                max_size: 10000,
-                buffer_capacity: 50,
+                max_size: 1000000,
+                buffer_capacity: 64,
             },
             PoolConfig {
                 starting_size: 1000,
-                max_size: 10000,
-                buffer_capacity: 260,
+                max_size: 100000,
+                buffer_capacity: 256,
             },
             PoolConfig {
                 starting_size: 100,
-                max_size: 1000,
+                max_size: 10000,
                 buffer_capacity: 1200,
-            },
-            PoolConfig {
-                starting_size: 10,
-                max_size: 100,
-                buffer_capacity: 10000,
-            },
-            PoolConfig {
-                starting_size: 10,
-                max_size: 100,
-                buffer_capacity: 100000,
             },
             // the last one is where anything that doesn't fit is pulled from, and
             // it's possible vecs from here reallocate if you need larger messages.
-            // potentially up to ~ config.max_message_size
+            // however i don't think we ever need to allocate larger than a packet:
+            // when sending messages, a slice is passed in, which is split into fragments of
+            // 1024 before writing to buffers.
+            // When receiving a large fragmented message, ReceivedMessage provides a Reader which
+            // reads result spanning multiple fragment buffers.
             PoolConfig {
                 starting_size: 0,
                 max_size: 10,
-                buffer_capacity: 100001,
+                buffer_capacity: 2048,
             },
         ];
         Self::new(configs)
@@ -208,10 +175,11 @@ impl BufPool {
 
     /// Gets a buffer from a pool of vecs with an initial capacity of at least `min_size`
     pub(crate) fn get_buffer(&mut self, min_size: usize) -> PooledBuffer {
-        log::warn!("Getting buffer, cap {min_size}");
         for (config, pool) in self.pools.iter_mut() {
             if config.buffer_capacity >= min_size || config.buffer_capacity == 0 {
-                return pool.checkout();
+                let ret = pool.checkout();
+                log::warn!("🎱 Getting buffer for {min_size}: {ret:?}");
+                return ret;
             }
         }
         // anything larger always comes from the final pool, and perhaps you end up reallocating
@@ -222,7 +190,7 @@ impl BufPool {
     /// Checks the buffer back in to the pool so it can be reused
     pub(crate) fn return_buffer(&mut self, buffer: PooledBuffer) {
         let min_size = buffer.capacity();
-        log::warn!("Returning buffer, cap {min_size}");
+        log::warn!("🎱 Returning buffer of size: {} = {buffer:?}", buffer.len());
         for (config, pool) in self.pools.iter_mut() {
             if config.buffer_capacity >= min_size || config.buffer_capacity == 0 {
                 pool.checkin(buffer);

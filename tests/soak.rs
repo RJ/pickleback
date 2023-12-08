@@ -20,6 +20,9 @@ fn soak_message_transmission() {
     let channel = 0;
     let mut harness = MessageTestHarness::new(JitterPipeConfig::disabled());
 
+    log::warn!("server pools: \n{:?}", harness.server.pool());
+    log::warn!("client pools: \n{:?}", harness.client.pool());
+
     // pre-generate test messages of varying sizes, many of which require fragmentation
     let test_msgs = (0..NUM_TEST_MSGS)
         .map(|_| random_payload_max_frags(MAX_FRAGMENTS))
@@ -78,6 +81,9 @@ fn soak_message_transmission() {
             );
         }
     }
+
+    log::warn!("server pools: \n{:?}", harness.server.pool());
+    log::warn!("client pools: \n{:?}", harness.client.pool());
 }
 
 #[test]

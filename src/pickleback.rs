@@ -317,6 +317,7 @@ impl Pickleback {
                     channel,
                     writer.as_mut().unwrap(),
                     &mut message_handles_in_packet,
+                    &mut self.pool,
                 )? {
                     0 => break,
                     num_written => {
@@ -355,9 +356,10 @@ impl Pickleback {
         channel: &mut Channel,
         cursor: &mut BufferLimitedWriter,
         message_handles: &mut Vec<MessageHandle>,
+        pool: &mut BufPool,
     ) -> Result<usize, PicklebackError> {
         let mut num_written = 0;
-        while let Some(msg) = channel.get_message_to_write_to_a_packet(cursor.remaining()) {
+        while let Some(mut msg) = channel.get_message_to_write_to_a_packet(cursor.remaining()) {
             num_written += 1;
             cursor.write_all(msg.as_slice())?;
             message_handles.push(MessageHandle {
@@ -365,6 +367,7 @@ impl Pickleback {
                 frag_index: msg.fragment().map(|f| f.index),
                 channel: channel.id(),
             });
+            pool.return_buffer(msg.take_buffer());
             if cursor.remaining() < 3 {
                 break;
             }
