@@ -12,7 +12,7 @@ fn protocol() {
     init_logger();
     // let channel = 0;
     let mut harness = ProtocolTestHarness::new(JitterPipeConfig::disabled());
-    harness.client.connect("127.0.0.1:6000");
+    harness.client.connect("127.0.0.1:6000".parse().unwrap());
     harness.advance(0.1);
     harness.advance(0.1);
     harness.advance(0.1);

@@ -21,6 +21,8 @@ pub enum PicklebackError {
     NoSuchChannel,
     /// Packets received from wrong source
     SocketAddrMismatch,
+    /// Invalid client id
+    NoSuchClient,
 }
 
 /// Reasons for not being able to send due to backpressure

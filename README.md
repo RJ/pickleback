@@ -87,7 +87,7 @@ let channel: u8 = 0;
 // we unwrap here, since it will not fail at this point.
 let msg_id = {
     let mut connected_client = server.connected_clients_mut().next().unwrap();
-    connected_client.pickleback.send_message(channel, b"hello").unwrap()
+    connected_client.send_message(channel, b"hello").unwrap()
 };
 // server sends a Message packet containing a single message.
 // (when sending multiple messages, they are coalesced into as few packets as possible)
@@ -108,8 +108,7 @@ transmit_packets(&mut server, &mut client);
 
 // now the client has sent packets to the server, the server will have received an ack
 let mut connected_client = server.connected_clients_mut().next().unwrap();
-// TODO: don't expose pickleback via connected_client, proxy a couple of fns and document..
-assert_eq!(vec![msg_id], connected_client.pickleback.drain_message_acks(channel).collect::<Vec<_>>());
+assert_eq!(vec![msg_id], connected_client.drain_message_acks(channel).collect::<Vec<_>>());
 ```
 
 ## Protocol Overview

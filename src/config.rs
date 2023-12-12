@@ -2,6 +2,7 @@ use crate::MAX_FRAGMENTS;
 
 /// Various tunables. Mostly buffer sizes.
 #[derive(Clone)]
+#[cfg_attr(feature = "bevy", derive(bevy::prelude::Resource))]
 pub struct PicklebackConfig {
     /// Optionally specify buffer pool sizes and capacities.
     /// Default value of None will give sane defaults.

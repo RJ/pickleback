@@ -9,7 +9,7 @@ pub(crate) use packets::*;
 
 use crate::prelude::PicklebackError;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 #[repr(u8)]
 pub enum DisconnectReason {
     Normal = 0,

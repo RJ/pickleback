@@ -8,6 +8,10 @@ repository = "https://github.com/RJ/pickleback"
 license = "MIT OR Apache-2.0"
 keywords = ["netcode", "udp", "gamedev", "networking"]
 
+[features]
+default = []
+bevy = ["dep:bevy"]
+
 [dependencies]
 log = "0.4.20"
 env_logger = "0.10.0"
@@ -16,4 +20,4 @@ byteorder = "1.5.0"
 smallmap = "1.4.2"
 enum_dispatch = "0.3.12"
 assert_float_eq = "1.1.3"
-
+bevy = {version = "0.12", optional = true, default_features = false}

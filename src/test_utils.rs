@@ -182,7 +182,7 @@ impl ProtocolTestHarness {
         let server = PicklebackServer::new(time, &config);
         let mut client = PicklebackClient::new(time, &config);
         // addr doesn't matter in this test harness, it just has to be valid
-        client.connect("127.0.0.1:0");
+        client.connect("127.0.0.1:0".parse().unwrap());
         Self {
             server,
             client,

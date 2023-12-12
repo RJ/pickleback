@@ -9,7 +9,8 @@ use crate::{
 use super::*;
 
 /// Connection state of a client.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
+#[cfg_attr(feature = "bevy", derive(bevy::prelude::Event))]
 pub enum ClientState {
     /// Initial connection establishment request
     SendingConnectionRequest,
@@ -26,8 +27,9 @@ pub enum ClientState {
 /// The client end of a connection.
 ///
 /// Connects to a `PicklebackServer` instance.
+#[cfg_attr(feature = "bevy", derive(bevy::prelude::Resource))]
 pub struct PicklebackClient {
-    pub(crate) time: f64,
+    time: f64,
     state: ClientState,
     client_salt: Option<u64>,
     server_salt: Option<u64>,
@@ -35,8 +37,9 @@ pub struct PicklebackClient {
     proto_last_send: f64,
     last_receive_time: f64,
     last_send_time: f64,
-    pub(crate) pickleback: Pickleback,
+    pickleback: Pickleback,
     server_addr: Option<SocketAddr>,
+    state_transitions: VecDeque<ClientState>,
 }
 
 impl PicklebackClient {
@@ -53,17 +56,39 @@ impl PicklebackClient {
             last_send_time: 0.0,
             pickleback: Pickleback::new(config.clone(), 0.0),
             server_addr: None, //"127.0.0.1:6000".parse().expect("Invalid server address"),
+            state_transitions: VecDeque::new(),
         }
     }
 
     /// Advance time. This can potentially result in this connection timing out.
     pub fn update(&mut self, dt: f64) {
         self.time += dt;
+        self.pickleback.update(dt);
         if !matches!(self.state, ClientState::Disconnected(_))
-            && self.time - self.last_receive_time > 5.
+            && self.time - self.last_receive_time > CONNECTION_TIMEOUT
         {
             self.state_transition(ClientState::Disconnected(DisconnectReason::TimedOut));
         }
+    }
+
+    /// Returns `PicklebackStats`, which tracks metrics on packet and message counts, etc.
+    pub fn stats(&self) -> &PicklebackStats {
+        self.pickleback.stats()
+    }
+
+    /// Round-trip-time estimation in seconds.
+    pub fn rtt(&self) -> f32 {
+        self.pickleback.rtt()
+    }
+
+    /// Packet loss estimation percent.
+    pub fn packet_loss(&self) -> f32 {
+        self.pickleback.packet_loss()
+    }
+
+    /// Draining iterator over new message acks for a given channel
+    pub fn drain_message_acks(&mut self, channel: u8) -> std::vec::Drain<'_, MessageId> {
+        self.pickleback.drain_message_acks(channel)
     }
 
     /// Gives an iterator of new messages received by this client
@@ -71,18 +96,26 @@ impl PicklebackClient {
         self.pickleback.drain_received_messages(channel)
     }
 
+    /// Drain state transitions since last check
+    pub fn drain_state_transitions(
+        &mut self,
+    ) -> std::collections::vec_deque::Drain<'_, client::ClientState> {
+        self.state_transitions.drain(..)
+    }
+
     fn state_transition(&mut self, new_state: ClientState) {
         log::info!("Client transition {:?} --> {new_state:?}", self.state);
-        self.state = new_state;
+        self.state = new_state.clone();
         self.proto_last_send = 0.0;
         self.pickleback.set_xor_salt(self.xor_salt);
         if matches!(self.state, ClientState::Disconnected(_)) {
             self.reset();
         }
+        self.state_transitions.push_back(new_state);
     }
 
     fn reset(&mut self) {
-        log::info!("Reseting PicklebackClient");
+        log::debug!("Reseting PicklebackClient");
         self.client_salt = None;
         self.server_salt = None;
         self.xor_salt = None;
@@ -120,13 +153,12 @@ impl PicklebackClient {
     ///
     /// # Panics
     /// Will panic if server address can't parse to a SocketAddr.
-    pub fn connect(&mut self, server: &str) {
-        let server_addr: SocketAddr = server.parse().expect("Invalid server address");
+    pub fn connect(&mut self, server_addr: SocketAddr) {
         self.server_addr = Some(server_addr);
         self.server_salt = None;
         self.xor_salt = None;
         self.client_salt = Some(rand::random::<u64>());
-        log::info!(
+        log::debug!(
             "Client::connect - assigned ourselves salt: {:?}",
             self.client_salt
         );
@@ -165,11 +197,13 @@ impl PicklebackClient {
                         let _ = self.send(d);
                     }
                 }
-                log::info!("Reseting Protocol Client state after disconnect");
+                log::debug!("Reseting Protocol Client state after disconnect");
                 self.state_transition(ClientState::Disconnected(DisconnectReason::Normal));
             }
 
-            ClientState::SendingConnectionRequest if self.proto_last_send < self.time - 0.1 => {
+            ClientState::SendingConnectionRequest
+                if self.proto_last_send < self.time - HANDSHAKE_RESEND_INTERVAL =>
+            {
                 if let Ok(header) = self
                     .pickleback
                     .next_packet_header(PacketType::ConnectionRequest)
@@ -188,7 +222,8 @@ impl PicklebackClient {
             }
 
             ClientState::SendingChallengeResponse
-                if self.proto_last_send < self.time - 0.1 && self.xor_salt.is_some() =>
+                if self.proto_last_send < self.time - HANDSHAKE_RESEND_INTERVAL
+                    && self.xor_salt.is_some() =>
             {
                 if let Ok(header) = self
                     .pickleback
@@ -209,20 +244,23 @@ impl PicklebackClient {
             }
 
             ClientState::Connected => {
-                keepalive_needed = self.time - self.last_send_time >= 0.1;
+                keepalive_needed = self.time - self.last_send_time >= KEEPALIVE_INTERVAL;
             }
 
             _ => {}
         }
-        let mut sent = 0;
 
-        self.pickleback.visit_packets_to_send(|packet| {
-            send_fn(server_addr, packet);
-            sent += 1;
-        });
+        let sent = self
+            .pickleback
+            .visit_packets_to_send(|packet| send_fn(server_addr, packet));
 
         if sent == 0 && keepalive_needed {
-            log::info!("Client needs to send keepalive");
+            log::debug!(
+                "KeepAlive needed. send_unacked:{} received_unacked:{} received_unacked_nonempt:{}",
+                self.pickleback.sent_unacked_packets(),
+                self.pickleback.received_unacked_packets(),
+                self.pickleback.received_unacked_non_empty_packets()
+            );
             // it's possible we can't, due to backpressure because of too many unacked packets
             // in flight, but in that case there's probably no hope for this connection anyway.
             if let Ok(header) = self.pickleback.next_packet_header(PacketType::KeepAlive) {
@@ -237,7 +275,6 @@ impl PicklebackClient {
             }
             self.pickleback.visit_packets_to_send(|packet| {
                 send_fn(server_addr, packet);
-                sent += 1;
             });
         }
     }
@@ -258,7 +295,7 @@ impl PicklebackClient {
         let new_state = {
             let packet = read_packet(&mut cur)?;
             self.last_receive_time = self.time;
-            log::info!("client got >>> {packet:?}");
+            log::trace!("client got >>> {packet:?}");
             match packet {
                 ProtocolPacket::ConnectionChallenge(ConnectionChallengePacket {
                     header,
@@ -321,7 +358,10 @@ impl PicklebackClient {
                     None
                 }
                 p => {
-                    log::warn!(
+                    // totally normal to get some useless packets here because during a handshake
+                    // the remote may send a second Challenge while our ChallengeResponse is still
+                    // in flight, amongst other examples.
+                    log::trace!(
                         "Discarding unhandled {p:?} in client state: {:?}",
                         self.state
                     );

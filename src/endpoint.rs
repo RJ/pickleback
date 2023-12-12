@@ -13,6 +13,8 @@ pub struct Pickleback {
     /// We know we've successfully acked up to this point, so when constructing the ack field in
     /// outbound packet headers, we don't need to bother acking anything lower than this id:
     ack_low_watermark: Option<PacketId>,
+    /// as above but for packets worth acking. ignores keepalives and empty messages.
+    ack_low_watermark_non_empty: Option<PacketId>,
     dispatcher: MessageDispatcher,
     channels: ChannelList,
     sent_buffer: SequenceBuffer<SentMeta>,
@@ -53,6 +55,7 @@ impl Pickleback {
             sequence_id: 0,
             newest_ack: None,
             ack_low_watermark: None,
+            ack_low_watermark_non_empty: None,
             sent_buffer: SequenceBuffer::with_capacity(config.sent_packets_buffer_size),
             received_buffer: SequenceBuffer::with_capacity(config.received_packets_buffer_size),
             dispatcher: MessageDispatcher::new(&config),
@@ -68,6 +71,7 @@ impl Pickleback {
     pub fn pool(&self) -> &BufPool {
         &self.pool
     }
+
     /*
     pub(crate) fn reset(&mut self) {
         self.rtt = 0.0;
@@ -111,28 +115,6 @@ impl Pickleback {
         self.time
     }
 
-    /// Draining iterator over packets in the outbox that we need to send over the network.
-    ///
-    /// Call this and send packets to the other Pickleback endpoint via a network transport.
-    ///
-    /// # Panics
-    ///
-    /// If unable to write all packets, for whatever reason (for development..)
-    ///
-    // pub fn drain_packets_to_send(&mut self) -> std::collections::vec_deque::Drain<'_, BufHandle> {
-    //     match self.compose_packets() {
-    //         Ok(()) => self.outbox.drain(..),
-    //         Err(PicklebackError::Backpressure(bp)) => {
-    //             // Might have written some packets, but not all.
-    //             // still want to return the iterator.
-    //             // TODO This should be a reportable non-fatal condition of some sort.
-    //             warn!("[{}] Can't fully send this tick: {bp:?}", self.time);
-    //             self.outbox.drain(..)
-    //         }
-    //         Err(e) => panic!("error writing packets to send: {e:?}"),
-    //     }
-    // }
-
     /// Consumes internal buffer of pending outbound packets, calling `send_fn` on each one.
     ///
     /// Call this and send packets to the other Pickleback endpoint via the network.
@@ -141,23 +123,26 @@ impl Pickleback {
     ///
     /// If unable to write all packets, for whatever reason except backpressure.
     ///
-    pub fn visit_packets_to_send(&mut self, mut send_fn: impl FnMut(&[u8])) {
+    pub fn visit_packets_to_send(&mut self, mut send_fn: impl FnMut(&[u8])) -> usize {
+        let mut num_sent = 0;
         match self.compose_packets() {
             Ok(_) | Err(PicklebackError::Backpressure(_)) => {
                 // even if backpressure, *some* packets may have been written to the outbox
                 for packet in self.outbox.drain(..) {
                     send_fn(packet.as_ref());
                     self.pool.return_buffer(packet);
+                    num_sent += 1;
                 }
             }
             Err(e) => {
                 panic!("Error writing packtes to send {e:?}");
             }
         }
+        num_sent
     }
 
-    /// Clone packets in the outbound queue into a vec, instead of using the visitor pattern
-    /// via `visit_packets_to_send()` - this is just for unit tests.
+    /// Drain packets from the outbound queue into a vec, instead of using the visitor pattern
+    /// via `visit_packets_to_send()` - this is just for tests.
     pub fn collect_packets_to_send_inefficiently(&mut self) -> Vec<Vec<u8>> {
         let mut ret = Vec::new();
         self.visit_packets_to_send(|s| ret.push(s.to_vec()));
@@ -228,12 +213,32 @@ impl Pickleback {
     /// bound used to construct the ackfield we include in packet headers.
     ///
     /// ie, used to decide what range of acks to send with every outbound packet.
-    fn received_unacked_packets(&self) -> u16 {
+    pub(crate) fn received_unacked_packets(&self) -> u16 {
         if let Some(lowest_ack) = self.ack_low_watermark {
             self.received_buffer.sequence().wrapping_sub(lowest_ack.0)
         } else {
             // nothing has been acked yet, so everything?
             self.received_buffer.sequence()
+        }
+    }
+
+    /// How many packets we've received that an ack hasn't been seen for yet, but ignoring
+    /// empty messages packets and keep alives. This tracks the number of unseen-ack packets
+    /// that are actually worth sending another packet in order to transmit acks for.
+    pub(crate) fn received_unacked_non_empty_packets(&self) -> u16 {
+        if let Some(lowest_ack) = self.ack_low_watermark_non_empty {
+            if !SequenceBuffer::<u16>::sequence_less_than(
+                self.received_buffer.sequence(),
+                lowest_ack.0,
+            ) {
+                0
+            } else {
+                self.received_buffer.sequence().wrapping_sub(lowest_ack.0)
+            }
+        } else {
+            // nothing has been acked yet, so everything?
+            0
+            // self.received_buffer.sequence()
         }
     }
 
@@ -252,7 +257,7 @@ impl Pickleback {
         self.sequence_id = self.sequence_id.wrapping_add(1);
         let id = PacketId(self.sequence_id);
         let num_acks_required = self.received_unacked_packets();
-        info!("Num acks required in packet id {id:?} = {num_acks_required}");
+        // info!("Num acks required in packet id {id:?} = {num_acks_required}");
         if num_acks_required > MAX_UNACKED_PACKETS {
             warn!("Not composing packet, backpressure.");
             return Err(PicklebackError::Backpressure(Backpressure::TooManyPending));
@@ -342,8 +347,14 @@ impl Pickleback {
         }
 
         // we should force send if still have ACKs to transmit that the remote hasn't acknowledged yet
-        if !sent_something && self.received_unacked_packets() > 0 {
-            self.send_empty_packet()?;
+        // TODO we mustn't care about acks on empty message or keepalive packets, otherwise
+        //      we will always have something that needs acking..
+        if !sent_something
+            && self.received_unacked_non_empty_packets() > 0
+            && self.xor_salt.is_some()
+        {
+            // log::warn!("Sending empty because received unacked non-empty..");
+            // self.send_empty_packet()?;
         }
         Ok(())
     }
@@ -393,6 +404,7 @@ impl Pickleback {
     /// Write a packet to a newly allocated buffer and send it.
     pub(crate) fn send_packet(&mut self, packet: ProtocolPacket) -> Result<(), PicklebackError> {
         // write_packet gets a pooled buffer, which is returned once visited for sending
+        log::info!(">>> {:?}", packet);
         let buf = write_packet(&mut self.pool, &self.config, packet)?;
         self.send_raw_packet(buf)
     }
@@ -420,11 +432,12 @@ impl Pickleback {
         )?;
         self.outbox.push_back(packet);
         self.stats.packets_sent += 1;
-        info!(
-            "Sent packet {:?}, acks_in_flight: {}",
-            self.sequence_id,
-            self.received_unacked_packets()
-        );
+        // info!(
+        //     "Sent packet {:?}, acks_in_flight: {} non_empty_acks_in_flight: {}",
+        //     self.sequence_id,
+        //     self.received_unacked_packets(),
+        //     self.received_unacked_non_empty_packets()
+        // );
         Ok(())
     }
 
@@ -461,11 +474,7 @@ impl Pickleback {
         payload_reader: &mut Cursor<&[u8]>,
     ) -> Result<(), PicklebackError> {
         self.stats.packets_received += 1;
-        log::trace!(
-            "<<< Receiving packet id:{:?} ack_id:{:?}",
-            header.id(),
-            header.ack_id(),
-        );
+        log::trace!("<<< {header:?}");
         // if this packet sequence is out of buffer range, reject as stale
         if !self.received_buffer.check_sequence(header.id().0) {
             log::debug!("Ignoring stale packet: {}", header.id().0);
@@ -548,6 +557,18 @@ impl Pickleback {
                     } else {
                         self.ack_low_watermark = Some(sent_data.acked_up_to);
                     }
+                    if !matches!(header.packet_type, PacketType::KeepAlive) {
+                        if let Some(lowest_ack) = self.ack_low_watermark_non_empty {
+                            if SequenceBuffer::<u16>::sequence_greater_than(
+                                sent_data.acked_up_to.0,
+                                lowest_ack.0,
+                            ) {
+                                self.ack_low_watermark_non_empty = Some(sent_data.acked_up_to);
+                            }
+                        } else {
+                            self.ack_low_watermark_non_empty = Some(sent_data.acked_up_to);
+                        }
+                    }
                     //
                     self.stats.packets_acked += 1;
                     sent_data.acked = true;
@@ -560,6 +581,10 @@ impl Pickleback {
                     }
                     // update rtt calculations
                     let rtt: f32 = (self.time - sent_data.time) as f32 * 1000.0;
+                    log::info!(
+                        "rtt = {rtt} header: {header:?} sent_data: {sent_data:?} self.time: {}",
+                        self.time
+                    );
                     if (self.rtt == 0.0 && rtt > 0.0) || (self.rtt - rtt).abs() < 0.00001 {
                         self.rtt = rtt;
                     } else {

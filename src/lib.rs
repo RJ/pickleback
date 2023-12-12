@@ -41,6 +41,10 @@ pub use endpoint::Pickleback;
 use received_message::*;
 use sequence_buffer::*;
 
+pub(crate) const HANDSHAKE_RESEND_INTERVAL: f64 = 0.1;
+pub(crate) const KEEPALIVE_INTERVAL: f64 = 0.016;
+pub(crate) const CONNECTION_TIMEOUT: f64 = 5.0;
+
 /// Easy importing of all the important bits
 pub mod prelude {
     pub use super::buffer_pool::PoolConfig;
@@ -48,7 +52,10 @@ pub mod prelude {
     pub use super::config::PicklebackConfig;
     pub use super::error::{Backpressure, PicklebackError};
     pub use super::received_message::ReceivedMessage;
+    pub use super::received_message::ReceivedMessagesContainer;
+    pub use super::server::{ConnectedClient, ServerEvent};
     // pub use super::BufHandle;
+    pub use super::protocol::DisconnectReason;
     pub use super::MessageId;
     pub use super::Pickleback;
     pub use super::PicklebackStats;
