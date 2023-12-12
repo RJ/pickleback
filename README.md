@@ -8,6 +8,8 @@ It's expected this will be hooked up to UDP sockets; this crate has no networkin
 
 Under development. I'm RJ on bevy's Discord if you want to discuss.
 
+See also: [bevy_pickleback](https://github.com/RJ/bevy_pickleback) (also very much work-in-progress)
+
 There is an unencrypted handshake protocol for establishing a session between PiclebackServer and
 PicklebackClient. Most the the useful stuff happens when exchanging `Message` packets, after
 handshaking. See the test harness for example usage.
